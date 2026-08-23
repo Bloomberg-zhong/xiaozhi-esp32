@@ -20,6 +20,8 @@
 
 #define TAG "MCP"
 
+thread_local uint32_t McpServer::active_worker_generation_ = UINT32_MAX;
+
 McpServer::McpServer() {
 }
 
@@ -312,6 +314,28 @@ void McpServer::AddTool(const std::string& name, const std::string& description,
     AddTool(new McpTool(name, description, properties, callback));
 }
 
+void McpServer::AddWorkerTool(
+    const std::string& name, const std::string& description, const PropertyList& properties,
+    std::function<ReturnValue(const PropertyList&)> callback) {
+    auto* tool = new McpTool(name, description, properties, callback);
+    tool->set_run_in_worker(true);
+    AddTool(tool);
+}
+
+void McpServer::CancelWorkerTools() {
+    std::lock_guard<std::mutex> lock(worker_session_mutex_);
+    ++worker_generation_;
+}
+
+bool McpServer::RunIfCurrentWorkerCall(const std::function<void()>& callback) {
+    std::lock_guard<std::mutex> lock(worker_session_mutex_);
+    if (active_worker_generation_ != worker_generation_) {
+        return false;
+    }
+    callback();
+    return true;
+}
+
 void McpServer::AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback) {
     auto tool = new McpTool(name, description, properties, callback);
     tool->set_user_only(true);
@@ -449,6 +473,31 @@ void McpServer::ReplyError(int id, const std::string& message) {
     Application::GetInstance().SendMcpMessage(payload);
 }
 
+void McpServer::ReplyWorkerResult(int id, const std::string& result,
+                                  uint32_t worker_generation) {
+    std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
+    payload += std::to_string(id) + ",\"result\":";
+    payload += result;
+    payload += "}";
+    Application::GetInstance().SendMcpMessageIf(payload, [this, worker_generation]() {
+        std::lock_guard<std::mutex> lock(worker_session_mutex_);
+        return worker_generation == worker_generation_;
+    });
+}
+
+void McpServer::ReplyWorkerError(int id, const std::string& message,
+                                 uint32_t worker_generation) {
+    std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
+    payload += std::to_string(id);
+    payload += ",\"error\":{\"message\":\"";
+    payload += message;
+    payload += "\"}}";
+    Application::GetInstance().SendMcpMessageIf(payload, [this, worker_generation]() {
+        std::lock_guard<std::mutex> lock(worker_session_mutex_);
+        return worker_generation == worker_generation_;
+    });
+}
+
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
     const int max_payload_size = 8000;
     std::string json = "{\"tools\":[";
@@ -547,11 +596,69 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
+    auto* tool = *tool_iter;
+    if (tool->run_in_worker()) {
+        bool expected = false;
+        if (!worker_busy_.compare_exchange_strong(expected, true)) {
+            ReplyError(id, "Another background tool is still running");
+            return;
+        }
+
+        uint32_t worker_generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(worker_session_mutex_);
+            worker_generation = worker_generation_;
+        }
+
+        esp_pthread_cfg_t previous_thread_config = esp_pthread_get_default_config();
+        esp_pthread_get_cfg(&previous_thread_config);
+        esp_pthread_cfg_t thread_config = previous_thread_config;
+        thread_config.thread_name = "mcp_worker";
+        thread_config.stack_size = 12288;
+        thread_config.prio = 3;
+        thread_config.inherit_cfg = false;
+        if (esp_pthread_set_cfg(&thread_config) != ESP_OK) {
+            worker_busy_.store(false);
+            ReplyError(id, "Failed to configure background tool task");
+            return;
+        }
+
+        try {
+            std::thread worker([this, id, tool, worker_generation,
+                                arguments = std::move(arguments)]() {
+                active_worker_generation_ = worker_generation;
+                try {
+                    const std::string result = tool->Call(arguments);
+                    RunIfCurrentWorkerCall([this, id, &result, worker_generation]() {
+                        ReplyWorkerResult(id, result, worker_generation);
+                    });
+                } catch (const std::exception& e) {
+                    ESP_LOGE(TAG, "tools/call worker: %s", e.what());
+                    RunIfCurrentWorkerCall([this, id, &e, worker_generation]() {
+                        ReplyWorkerError(id, e.what(), worker_generation);
+                    });
+                }
+                active_worker_generation_ = UINT32_MAX;
+                worker_busy_.store(false);
+            });
+            if (esp_pthread_set_cfg(&previous_thread_config) != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to restore pthread configuration");
+            }
+            worker.detach();
+        } catch (const std::exception& e) {
+            esp_pthread_set_cfg(&previous_thread_config);
+            worker_busy_.store(false);
+            ESP_LOGE(TAG, "tools/call worker start: %s", e.what());
+            ReplyError(id, e.what());
+        }
+        return;
+    }
+
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
+    app.Schedule([this, id, tool, arguments = std::move(arguments)]() {
         try {
-            ReplyResult(id, (*tool_iter)->Call(arguments));
+            ReplyResult(id, tool->Call(arguments));
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "tools/call: %s", e.what());
             ReplyError(id, e.what());

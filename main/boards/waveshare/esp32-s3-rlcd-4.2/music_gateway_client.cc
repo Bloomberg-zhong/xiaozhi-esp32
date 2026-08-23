@@ -141,8 +141,8 @@ std::string MusicGatewayClient::GetBaseUrl() const {
 std::vector<MusicGatewaySong> MusicGatewayClient::Search(const std::string& query,
                                                          const std::string& source,
                                                          std::string& error) {
-    if (query.empty()) {
-        error = "搜索关键词不能为空";
+    if (!IsValidMusicSearchQuery(query)) {
+        error = query.empty() ? "搜索关键词不能为空" : "搜索关键词过长";
         return {};
     }
     const std::string selected_source = source.empty() ? "all" : source;
@@ -188,11 +188,12 @@ std::vector<MusicGatewaySong> MusicGatewayClient::Search(const std::string& quer
         error = "没有搜索到可识别的歌曲";
         return {};
     }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        search_results_ = songs;
-    }
     return songs;
+}
+
+void MusicGatewayClient::SetSearchResults(const std::vector<MusicGatewaySong>& songs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    search_results_ = songs;
 }
 
 std::optional<MusicGatewayPlayback> MusicGatewayClient::ResolvePlayback(size_t one_based_index,

@@ -84,8 +84,10 @@ bool ParseLrcTimestamp(const std::string& tag, uint32_t& timestamp_ms) {
 }  // namespace
 
 bool WeatherData::IsValid() const {
-    return !city.empty() && !condition.empty() && temperature_c >= -100 && temperature_c <= 100 &&
-           humidity_percent >= -1 && humidity_percent <= 100;
+    return !city.empty() && city.size() <= kMaxWeatherCityBytes && !condition.empty() &&
+           condition.size() <= kMaxWeatherConditionBytes &&
+           updated_at.size() <= kMaxWeatherTimestampBytes && temperature_c >= -100 &&
+           temperature_c <= 100 && humidity_percent >= -1 && humidity_percent <= 100;
 }
 
 std::string FormatWifiStatus(bool connected, int rssi) {
@@ -194,6 +196,7 @@ ReminderBook::ReminderBook(size_t capacity) : capacity_(capacity) {}
 
 bool ReminderBook::Add(ReminderItem item) {
     if (items_.size() >= capacity_ || item.id.empty() || item.content.empty() ||
+        item.content.size() > kMaxReminderContentBytes ||
         (!item.time.empty() && !IsValidReminderTime(item.time))) {
         return false;
     }

@@ -395,21 +395,30 @@ void CustomLcdDisplay::ShowPageLocked(rlcd_dashboard::DashboardPage page) {
 }
 
 void CustomLcdDisplay::SwitchToMusicPage() {
+    auto& application = Application::GetInstance();
     DisplayLockGuard lock(this);
     preferred_idle_page_ = rlcd_dashboard::DashboardPage::kMusic;
-    ShowPageLocked(rlcd_dashboard::DashboardPage::kMusic);
+    ShowPageLocked(
+        rlcd_dashboard::SelectDashboardPage(ToAssistantUiState(application.GetDeviceState()),
+                                            application.IsMusicPlaying(), preferred_idle_page_));
 }
 
 void CustomLcdDisplay::SwitchToWeatherPage() {
+    auto& application = Application::GetInstance();
     DisplayLockGuard lock(this);
     preferred_idle_page_ = rlcd_dashboard::DashboardPage::kHome;
-    ShowPageLocked(rlcd_dashboard::DashboardPage::kHome);
+    ShowPageLocked(
+        rlcd_dashboard::SelectDashboardPage(ToAssistantUiState(application.GetDeviceState()),
+                                            application.IsMusicPlaying(), preferred_idle_page_));
 }
 
 void CustomLcdDisplay::ToggleHomeMusicPage() {
+    auto& application = Application::GetInstance();
     DisplayLockGuard lock(this);
     preferred_idle_page_ = rlcd_dashboard::ToggleIdleDashboardPage(preferred_idle_page_);
-    ShowPageLocked(preferred_idle_page_);
+    ShowPageLocked(
+        rlcd_dashboard::SelectDashboardPage(ToAssistantUiState(application.GetDeviceState()),
+                                            application.IsMusicPlaying(), preferred_idle_page_));
 }
 
 void CustomLcdDisplay::DashboardTimerCallback(lv_timer_t* timer) {

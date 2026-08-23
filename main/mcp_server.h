@@ -2,6 +2,8 @@
 #define MCP_SERVER_H
 
 #include <string>
+#include <atomic>
+#include <mutex>
 #include <vector>
 #include <map>
 #include <functional>
@@ -212,6 +214,7 @@ private:
     PropertyList properties_;
     std::function<ReturnValue(const PropertyList&)> callback_;
     bool user_only_ = false;
+    bool run_in_worker_ = false;
 
 public:
     McpTool(const std::string& name, 
@@ -224,10 +227,12 @@ public:
         callback_(callback) {}
 
     void set_user_only(bool user_only) { user_only_ = user_only; }
+    void set_run_in_worker(bool run_in_worker) { run_in_worker_ = run_in_worker; }
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
     inline const PropertyList& properties() const { return properties_; }
     inline bool user_only() const { return user_only_; }
+    inline bool run_in_worker() const { return run_in_worker_; }
 
     std::string to_json() const {
         std::vector<std::string> required = properties_.GetRequired();
@@ -322,7 +327,12 @@ public:
     void AddUserOnlyTools();
     void AddTool(McpTool* tool);
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    void AddWorkerTool(const std::string& name, const std::string& description,
+                       const PropertyList& properties,
+                       std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    void CancelWorkerTools();
+    bool RunIfCurrentWorkerCall(const std::function<void()>& callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
 
@@ -334,11 +344,17 @@ private:
 
     void ReplyResult(int id, const std::string& result);
     void ReplyError(int id, const std::string& message);
+    void ReplyWorkerResult(int id, const std::string& result, uint32_t worker_generation);
+    void ReplyWorkerError(int id, const std::string& message, uint32_t worker_generation);
 
     void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
 
     std::vector<McpTool*> tools_;
+    std::atomic<bool> worker_busy_{false};
+    std::mutex worker_session_mutex_;
+    uint32_t worker_generation_ = 0;
+    static thread_local uint32_t active_worker_generation_;
 };
 
 #endif // MCP_SERVER_H

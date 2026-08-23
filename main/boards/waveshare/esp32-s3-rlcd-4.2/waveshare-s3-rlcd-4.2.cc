@@ -191,7 +191,7 @@ private:
                                    : ReturnValue(std::string("当前音乐网关：") + url);
             });
 
-        mcp_server.AddTool(
+        mcp_server.AddWorkerTool(
             "self.music.search",
             "从音乐网关搜索歌曲。source 可为 all、netease、qq、kugou、kuwo、migu；all "
             "会并发聚合多源。",
@@ -204,6 +204,11 @@ private:
                     properties["source"].value<std::string>(), error);
                 if (songs.empty()) {
                     return error;
+                }
+                if (!McpServer::GetInstance().RunIfCurrentWorkerCall([&songs]() {
+                        rlcd_dashboard::MusicGatewayClient::Instance().SetSearchResults(songs);
+                    })) {
+                    return std::string("音乐搜索已取消");
                 }
                 std::string result = "搜索结果（使用 index 播放）：\n";
                 for (size_t index = 0; index < songs.size(); ++index) {
@@ -225,7 +230,7 @@ private:
                 return result;
             });
 
-        mcp_server.AddTool(
+        mcp_server.AddWorkerTool(
             "self.music.play",
             "播放 self.music.search "
             "返回的歌曲序号。播放前会探测可用性，失效时自动匹配其他公开音源。",
@@ -237,9 +242,14 @@ private:
                 if (!playback.has_value()) {
                     return error;
                 }
-                const bool started = Application::GetInstance().PlayMusicFromUrl(
-                    playback->audio_url, playback->song.name, playback->song.artist, "",
-                    playback->lyric_url);
+                bool started = false;
+                if (!McpServer::GetInstance().RunIfCurrentWorkerCall([&playback, &started]() {
+                        started = Application::GetInstance().PlayMusicFromUrl(
+                            playback->audio_url, playback->song.name, playback->song.artist, "",
+                            playback->lyric_url);
+                    })) {
+                    return std::string("音乐播放请求已取消");
+                }
                 if (!started) {
                     return std::string("音乐播放启动失败；如果已有歌曲在播放，请先停止当前歌曲");
                 }

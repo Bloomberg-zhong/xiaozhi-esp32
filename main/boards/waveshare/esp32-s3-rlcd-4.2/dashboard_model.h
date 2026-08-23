@@ -8,6 +8,11 @@
 
 namespace rlcd_dashboard {
 
+inline constexpr size_t kMaxWeatherCityBytes = 48;
+inline constexpr size_t kMaxWeatherConditionBytes = 48;
+inline constexpr size_t kMaxWeatherTimestampBytes = 64;
+inline constexpr size_t kMaxReminderContentBytes = 192;
+
 enum class BluetoothState {
     kDisabled,
     kDisconnected,

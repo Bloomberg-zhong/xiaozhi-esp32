@@ -25,6 +25,7 @@ public:
     std::string GetBaseUrl() const;
     std::vector<MusicGatewaySong> Search(const std::string& query, const std::string& source,
                                          std::string& error);
+    void SetSearchResults(const std::vector<MusicGatewaySong>& songs);
     std::optional<MusicGatewayPlayback> ResolvePlayback(size_t one_based_index, std::string& error);
 
 private:

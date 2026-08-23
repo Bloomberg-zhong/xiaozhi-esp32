@@ -114,6 +114,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendMcpMessageIf(const std::string& payload, std::function<bool()> should_send);
     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }

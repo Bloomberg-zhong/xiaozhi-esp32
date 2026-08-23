@@ -67,6 +67,16 @@ void TestWeatherValidation() {
     assert(weather.IsValid());
     weather.humidity_percent = 101;
     assert(!weather.IsValid());
+
+    weather.humidity_percent = 50;
+    weather.city = std::string(kMaxWeatherCityBytes + 1, 'x');
+    assert(!weather.IsValid());
+    weather.city = "上海";
+    weather.condition = std::string(kMaxWeatherConditionBytes + 1, 'x');
+    assert(!weather.IsValid());
+    weather.condition = "多云";
+    weather.updated_at = std::string(kMaxWeatherTimestampBytes + 1, 'x');
+    assert(!weather.IsValid());
 }
 
 void TestHomeDateFormatting() {
@@ -96,6 +106,7 @@ void TestReminderTimeAndDueMatching() {
 void TestReminderBookBoundsAndOneShotPop() {
     ReminderBook book(2);
     assert(!book.Add({"bad", "not-a-time", "无效"}));
+    assert(!book.Add({"long-id", "07:30", std::string(kMaxReminderContentBytes + 1, 'x')}));
     assert(book.Add({"one", "07:30", "开会"}));
     assert(book.Add({"two", "", "买牛奶"}));
     assert(!book.Add({"three", "08:00", "超限"}));
@@ -148,6 +159,12 @@ void TestMusicGatewayUrlConstruction() {
     assert(IsValidMusicGatewayBaseUrl("https://music.example.com/api-root/"));
     assert(!IsValidMusicGatewayBaseUrl("ftp://music.example.com"));
     assert(!IsValidMusicGatewayBaseUrl("https://"));
+    assert(!IsValidMusicGatewayBaseUrl("https://user:pass@music.example.com"));
+    assert(!IsValidMusicGatewayBaseUrl("https://music.example.com?token=secret"));
+    assert(
+        !IsValidMusicGatewayBaseUrl("https://" + std::string(kMaxMusicGatewayBaseUrlBytes, 'x')));
+    assert(IsValidMusicSearchQuery("稻香 周杰伦"));
+    assert(!IsValidMusicSearchQuery(std::string(kMaxMusicSearchQueryBytes + 1, 'x')));
     assert(NormalizeMusicGatewayBaseUrl("http://music.local:8080///") == "http://music.local:8080");
 
     assert(UrlEncode("周杰伦 稻香") == "%E5%91%A8%E6%9D%B0%E4%BC%A6%20%E7%A8%BB%E9%A6%99");
@@ -167,6 +184,11 @@ void TestMusicGatewayPlaybackUrls() {
     song.album = "魔杰座";
     song.duration_seconds = 223;
     song.extra_json = "{\"quality\":\"standard\"}";
+    assert(song.IsValid());
+
+    MusicGatewaySong oversized = song;
+    oversized.name = std::string(kMaxMusicSongTextBytes + 1, 'x');
+    assert(!oversized.IsValid());
 
     const std::string query =
         "id=12345&source=netease&name=%E7%A8%BB%E9%A6%99&artist=%E5%91%A8%E6%9D%B0%E4%BC%A6"

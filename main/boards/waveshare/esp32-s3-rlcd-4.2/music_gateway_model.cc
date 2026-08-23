@@ -35,10 +35,16 @@ std::string BuildSongEndpoint(const std::string& base_url, const char* endpoint,
 }  // namespace
 
 bool MusicGatewaySong::IsValid() const {
-    return !id.empty() && IsSupportedMusicGatewaySource(source) && !name.empty();
+    return !id.empty() && id.size() <= kMaxMusicSongTextBytes &&
+           IsSupportedMusicGatewaySource(source) && !name.empty() &&
+           name.size() <= kMaxMusicSongTextBytes && artist.size() <= kMaxMusicSongTextBytes &&
+           album.size() <= kMaxMusicSongTextBytes && extra_json.size() <= kMaxMusicSongExtraBytes;
 }
 
 bool IsValidMusicGatewayBaseUrl(const std::string& value) {
+    if (value.size() > kMaxMusicGatewayBaseUrlBytes) {
+        return false;
+    }
     const size_t prefix_length =
         value.compare(0, 7, "http://") == 0 ? 7 : (value.compare(0, 8, "https://") == 0 ? 8 : 0);
     if (prefix_length == 0 || value.size() <= prefix_length) {
@@ -46,11 +52,16 @@ bool IsValidMusicGatewayBaseUrl(const std::string& value) {
     }
     for (size_t index = prefix_length; index < value.size(); ++index) {
         const unsigned char character = static_cast<unsigned char>(value[index]);
-        if (std::isspace(character) != 0) {
+        if (std::isspace(character) != 0 || character == '@' || character == '?' ||
+            character == '#') {
             return false;
         }
     }
     return value[prefix_length] != '/';
+}
+
+bool IsValidMusicSearchQuery(const std::string& value) {
+    return !value.empty() && value.size() <= kMaxMusicSearchQueryBytes;
 }
 
 bool IsSupportedMusicGatewaySource(const std::string& source) {

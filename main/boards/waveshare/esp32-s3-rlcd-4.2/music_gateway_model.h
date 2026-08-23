@@ -4,6 +4,11 @@
 
 namespace rlcd_dashboard {
 
+inline constexpr size_t kMaxMusicGatewayBaseUrlBytes = 256;
+inline constexpr size_t kMaxMusicSearchQueryBytes = 128;
+inline constexpr size_t kMaxMusicSongTextBytes = 192;
+inline constexpr size_t kMaxMusicSongExtraBytes = 2048;
+
 struct MusicGatewaySong {
     std::string id;
     std::string source;
@@ -17,6 +22,7 @@ struct MusicGatewaySong {
 };
 
 bool IsValidMusicGatewayBaseUrl(const std::string& value);
+bool IsValidMusicSearchQuery(const std::string& value);
 bool IsSupportedMusicGatewaySource(const std::string& source);
 std::string NormalizeMusicGatewayBaseUrl(const std::string& value);
 std::string UrlEncode(const std::string& value);

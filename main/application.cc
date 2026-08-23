@@ -30,6 +30,10 @@
 
 namespace {
 
+constexpr size_t kMaxMusicUrlBytes = 2048;
+constexpr size_t kMaxMusicMetadataBytes = 192;
+constexpr size_t kMaxMusicLyricBytes = 32 * 1024;
+
 struct MusicPlaybackTaskArgs {
     Application* app;
     std::string url;
@@ -1419,6 +1423,20 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
+void Application::SendMcpMessageIf(const std::string& payload, std::function<bool()> should_send) {
+    Schedule([this, payload, should_send = std::move(should_send)]() {
+        if (!should_send()) {
+            return;
+        }
+        if (protocol_) {
+            protocol_->SendMcpMessage(payload);
+        }
+        if (mcp_broadcast_callback_) {
+            mcp_broadcast_callback_(payload);
+        }
+    });
+}
+
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
@@ -1451,7 +1469,10 @@ void Application::PlaySound(const std::string_view& sound) { audio_service_.Play
 bool Application::PlayMusicFromUrl(const std::string& url, const std::string& title,
                                    const std::string& artist, const std::string& lyric,
                                    const std::string& lyric_url) {
-    if (!IsHttpUrl(url) || (!lyric_url.empty() && !IsHttpUrl(lyric_url))) {
+    if (url.size() > kMaxMusicUrlBytes || lyric_url.size() > kMaxMusicUrlBytes ||
+        title.size() > kMaxMusicMetadataBytes || artist.size() > kMaxMusicMetadataBytes ||
+        lyric.size() > kMaxMusicLyricBytes || !IsHttpUrl(url) ||
+        (!lyric_url.empty() && !IsHttpUrl(lyric_url))) {
         return false;
     }
     {
@@ -1544,7 +1565,7 @@ void Application::StartMusicPlayback(std::string url, std::string title, std::st
 void Application::MusicPlaybackTask(std::string url, std::string title, std::string artist,
                                     std::string lyric, std::string lyric_url) {
     constexpr int kReadBufferSize = 2048;
-    constexpr size_t kMaxLyricBytes = 128 * 1024;
+    constexpr size_t kMaxLyricBytes = kMaxMusicLyricBytes;
     auto& board = Board::GetInstance();
     auto* codec = board.GetAudioCodec();
     auto* display = board.GetDisplay();
@@ -1758,11 +1779,12 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                     }
 
                     if (!pcm.empty() && !stop_music_playback_.load()) {
-                        if (!codec->output_enabled()) {
-                            codec->EnableOutput(true);
+                        const size_t pcm_samples = pcm.size();
+                        if (!audio_service_.PushPcmToPlaybackQueue(std::move(pcm), true)) {
+                            playback_failed = !stop_music_playback_.load();
+                            break;
                         }
-                        codec->OutputData(pcm);
-                        total_output_samples += pcm.size();
+                        total_output_samples += pcm_samples;
                         const uint32_t position_ms = static_cast<uint32_t>(
                             static_cast<uint64_t>(total_output_samples) * 1000 /
                             (codec->output_sample_rate() * codec->output_channels()));
@@ -1822,6 +1844,10 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     if (decoder_registered) {
         esp_audio_dec_unregister_default();
     }
+    while (playback_finished && !playback_failed && !stop_music_playback_.load() &&
+           !audio_service_.IsPlaybackIdle()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     audio_service_.SetExternalPlaybackActive(false);
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
@@ -1854,7 +1880,6 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
 void Application::UpdateMusicLyric(const std::string& lyric) {
     Schedule([lyric]() {
         auto* display = Board::GetInstance().GetDisplay();
-        display->SwitchToMusicPage();
         display->SetMusicLyric(lyric.c_str());
     });
 }
@@ -1867,6 +1892,7 @@ void Application::StopMusicPlayback(bool return_to_weather) {
         return;
     }
     stop_music_playback_.store(true);
+    audio_service_.ResetDecoder();
     if (return_to_weather) {
         Schedule([]() {
             auto* display = Board::GetInstance().GetDisplay();
@@ -1878,6 +1904,7 @@ void Application::StopMusicPlayback(bool return_to_weather) {
 }
 
 void Application::ResetProtocol() {
+    McpServer::GetInstance().CancelWorkerTools();
     StopMusicPlayback();
     Schedule([this]() {
         if (GetDeviceState() == kDeviceStateNotifying) {
