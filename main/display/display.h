@@ -44,6 +44,11 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual void SetMusicInfo(const char* title, const char* artist);
+    virtual void SetMusicLyric(const char* lyric);
+    virtual void SetMusicProgress(uint32_t current_ms, uint32_t total_ms);
+    virtual void SwitchToMusicPage();
+    virtual void SwitchToWeatherPage();
     virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) { return false; }
     virtual void ClearTextGlyphs() {}
     virtual void SetEmojiCollection(std::shared_ptr<EmojiCollection>) {}

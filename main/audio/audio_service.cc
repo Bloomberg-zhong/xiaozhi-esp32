@@ -795,6 +795,16 @@ void AudioService::ResetDecoder() {
     }
 }
 
+void AudioService::SetExternalPlaybackActive(bool active) {
+    external_playback_active_.store(active);
+    last_output_time_ = std::chrono::steady_clock::now();
+    if (active && !codec_->output_enabled()) {
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        codec_->EnableOutput(true);
+    }
+}
+
 bool AudioService::IsPlaybackDrainedLocked() const {
     return audio_decode_queue_.empty() && audio_playback_queue_.empty() &&
         !decode_in_flight_ && !output_in_flight_;
@@ -817,7 +827,8 @@ void AudioService::CheckAndUpdateAudioPowerState() {
         // input task instead of closing the codec from the esp_timer task.
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
     }
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+    if (!external_playback_active_.load() && output_elapsed > AUDIO_POWER_TIMEOUT_MS &&
+        codec_->output_enabled()) {
         // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
         if (!(codec_->duplex() && codec_->input_enabled())) {
             codec_->EnableOutput(false);

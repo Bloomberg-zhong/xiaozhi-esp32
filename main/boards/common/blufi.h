@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -41,13 +42,16 @@ public:
      */
     esp_err_t deinit();
 
+    bool IsInitialized() const { return inited_.load(); }
+    bool IsBleConnected() const { return m_ble_is_connected.load(); }
+
     // Delete copy constructor and assignment operator for singleton
     Blufi(const Blufi &) = delete;
 
     Blufi &operator=(const Blufi &) = delete;
 
 private:
-    bool inited_ = false;
+    std::atomic<bool> inited_{false};
 
     Blufi();
 
@@ -130,7 +134,7 @@ private:
 
     // State variables
     wifi_config_t m_sta_config{};
-    bool m_ble_is_connected;
+    std::atomic<bool> m_ble_is_connected;
     bool m_sta_connected;
     bool m_sta_got_ip;
     bool m_provisioned;

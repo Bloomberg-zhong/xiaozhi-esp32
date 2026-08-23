@@ -46,3 +46,18 @@ void Display::SetTheme(Theme* theme) {
 }
 
 void Display::SetPowerSaveMode(bool on) { ESP_LOGW(TAG, "SetPowerSaveMode: %d", on); }
+
+void Display::SetMusicInfo(const char* title, const char* artist) {
+    ESP_LOGW(TAG, "SetMusicInfo: %s - %s", title, artist);
+}
+
+void Display::SetMusicLyric(const char* lyric) { ESP_LOGW(TAG, "SetMusicLyric: %s", lyric); }
+
+void Display::SetMusicProgress(uint32_t current_ms, uint32_t total_ms) {
+    ESP_LOGD(TAG, "SetMusicProgress: %lu/%lu", static_cast<unsigned long>(current_ms),
+             static_cast<unsigned long>(total_ms));
+}
+
+void Display::SwitchToMusicPage() {}
+
+void Display::SwitchToWeatherPage() {}

@@ -122,6 +122,11 @@ height_(height)
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
+    if (dashboard_timer_ != nullptr) {
+        DisplayLockGuard lock(this);
+        lv_timer_delete(dashboard_timer_);
+        dashboard_timer_ = nullptr;
+    }
 }
 
 void CustomLcdDisplay::InitPortraitLUT() {

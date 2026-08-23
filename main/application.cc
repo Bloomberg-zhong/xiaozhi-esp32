@@ -12,13 +12,102 @@
 #include "websocket_protocol.h"
 
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
+#include "esp_ae_rate_cvt.h"
+#include "esp_audio_dec_default.h"
+#include "esp_audio_simple_dec.h"
+#include "esp_audio_simple_dec_default.h"
+
 #define TAG "Application"
+
+namespace {
+
+struct MusicPlaybackTaskArgs {
+    Application* app;
+    std::string url;
+    std::string title;
+    std::string artist;
+    std::string lyric;
+    std::string lyric_url;
+};
+
+bool IsHttpUrl(const std::string& url) {
+    return url.compare(0, 7, "http://") == 0 || url.compare(0, 8, "https://") == 0;
+}
+
+struct MusicLyricLine {
+    uint32_t time_ms;
+    std::string text;
+};
+
+std::vector<MusicLyricLine> ParseMusicLrc(const std::string& lrc) {
+    std::vector<MusicLyricLine> lines;
+    size_t line_start = 0;
+    while (line_start <= lrc.size()) {
+        size_t line_end = lrc.find('\n', line_start);
+        if (line_end == std::string::npos) {
+            line_end = lrc.size();
+        }
+        std::string line = lrc.substr(line_start, line_end - line_start);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        std::vector<uint32_t> timestamps;
+        size_t cursor = 0;
+        while (cursor < line.size() && line[cursor] == '[') {
+            const size_t close = line.find(']', cursor + 1);
+            if (close == std::string::npos) {
+                break;
+            }
+            const std::string tag = line.substr(cursor + 1, close - cursor - 1);
+            int minutes = 0;
+            int seconds = 0;
+            int fraction = 0;
+            const int parsed = std::sscanf(tag.c_str(), "%d:%d.%d", &minutes, &seconds, &fraction);
+            if (parsed >= 2 && minutes >= 0 && seconds >= 0 && seconds <= 59) {
+                const size_t dot = tag.find('.');
+                if (parsed == 3 && dot != std::string::npos) {
+                    const size_t digits = tag.size() - dot - 1;
+                    if (digits == 1) {
+                        fraction *= 100;
+                    } else if (digits == 2) {
+                        fraction *= 10;
+                    }
+                } else {
+                    fraction = 0;
+                }
+                timestamps.push_back(static_cast<uint32_t>(minutes * 60000 + seconds * 1000 +
+                                                           std::clamp(fraction, 0, 999)));
+            }
+            cursor = close + 1;
+        }
+        const std::string text = line.substr(cursor);
+        if (!text.empty()) {
+            for (uint32_t timestamp : timestamps) {
+                lines.push_back({timestamp, text});
+            }
+        }
+        if (line_end == lrc.size()) {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    std::stable_sort(lines.begin(), lines.end(),
+                     [](const MusicLyricLine& left, const MusicLyricLine& right) {
+                         return left.time_ms < right.time_ms;
+                     });
+    return lines;
+}
+
+}  // namespace
 
 Application::Application() : notify_player_(audio_service_) {
     event_group_ = xEventGroupCreate();
@@ -557,7 +646,9 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        if (!IsMusicPlaying()) {
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        }
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
@@ -738,6 +829,10 @@ void Application::Alert(const char* status, const char* message, const char* emo
                         const std::string_view& sound) {
     ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
     auto display = Board::GetInstance().GetDisplay();
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+        display->SwitchToWeatherPage();
+    }
     display->SetStatus(status);
     display->SetEmotion(emotion);
     display->SetChatMessage("system", message);
@@ -763,6 +858,10 @@ void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
+
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
 
     if (state == kDeviceStateNotifying) {
         StopNotification();
@@ -828,6 +927,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
 
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
+
     if (state == kDeviceStateNotifying) {
         StopNotification();
         state = kDeviceStateIdle;
@@ -886,6 +989,10 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
 
     if (state == kDeviceStateIdle) {
         BeginWakeWordInvoke(wake_word);
@@ -1249,6 +1356,10 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 
     auto state = GetDeviceState();
 
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
+
     if (state == kDeviceStateIdle) {
         // May be called from outside the main task (e.g. board button
         // callbacks), so schedule the invocation instead of running it here
@@ -1276,7 +1387,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
-    if (GetDeviceState() != kDeviceStateIdle) {
+    if (GetDeviceState() != kDeviceStateIdle || IsMusicPlaying()) {
         return false;
     }
 
@@ -1337,7 +1448,437 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) { audio_service_.PlaySound(sound); }
 
+bool Application::PlayMusicFromUrl(const std::string& url, const std::string& title,
+                                   const std::string& artist, const std::string& lyric,
+                                   const std::string& lyric_url) {
+    if (!IsHttpUrl(url) || (!lyric_url.empty() && !IsHttpUrl(lyric_url))) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        if (music_playing_.load()) {
+            return false;
+        }
+        music_playing_.store(true);
+        stop_music_playback_.store(false);
+        music_progress_ms_.store(0);
+        music_total_ms_.store(0);
+        current_music_url_ = url;
+    }
+    Schedule([this, url, title, artist, lyric, lyric_url]() mutable {
+        StartMusicPlayback(std::move(url), std::move(title), std::move(artist), std::move(lyric),
+                           std::move(lyric_url));
+    });
+    return true;
+}
+
+void Application::StartMusicPlayback(std::string url, std::string title, std::string artist,
+                                     std::string lyric, std::string lyric_url) {
+    if (stop_music_playback_.load()) {
+        music_playing_.store(false);
+        current_music_url_.clear();
+        return;
+    }
+
+    auto state = GetDeviceState();
+    if (state == kDeviceStateNotifying) {
+        StopNotification();
+        state = GetDeviceState();
+    }
+    if (state == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    }
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    if (GetDeviceState() != kDeviceStateIdle && !SetDeviceState(kDeviceStateIdle)) {
+        ESP_LOGW(TAG, "Cannot start music from device state %d", GetDeviceState());
+        music_playing_.store(false);
+        current_music_url_.clear();
+        return;
+    }
+
+    audio_service_.ResetDecoder();
+    audio_service_.SetExternalPlaybackActive(true);
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
+    if (title.empty()) {
+        title = "未知歌曲";
+    }
+    if (artist.empty()) {
+        artist = "未知歌手";
+    }
+    auto* display = Board::GetInstance().GetDisplay();
+    display->SwitchToMusicPage();
+    display->SetMusicInfo(title.c_str(), artist.c_str());
+    display->SetMusicLyric(lyric.empty() ? "正在加载音乐..." : lyric.c_str());
+    display->SetMusicProgress(0, 0);
+
+    auto* args = new MusicPlaybackTaskArgs{this,
+                                           std::move(url),
+                                           std::move(title),
+                                           std::move(artist),
+                                           std::move(lyric),
+                                           std::move(lyric_url)};
+    const BaseType_t created = xTaskCreate(
+        [](void* context) {
+            std::unique_ptr<MusicPlaybackTaskArgs> args(
+                static_cast<MusicPlaybackTaskArgs*>(context));
+            args->app->MusicPlaybackTask(std::move(args->url), std::move(args->title),
+                                         std::move(args->artist), std::move(args->lyric),
+                                         std::move(args->lyric_url));
+            vTaskDelete(nullptr);
+        },
+        "music_stream", 12288, args, 3, &music_playback_task_handle_);
+    if (created != pdPASS) {
+        delete args;
+        music_playback_task_handle_ = nullptr;
+        music_playing_.store(false);
+        current_music_url_.clear();
+        audio_service_.SetExternalPlaybackActive(false);
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        display->SetMusicLyric("播放失败：无法创建播放任务");
+    }
+}
+
+void Application::MusicPlaybackTask(std::string url, std::string title, std::string artist,
+                                    std::string lyric, std::string lyric_url) {
+    constexpr int kReadBufferSize = 2048;
+    constexpr size_t kMaxLyricBytes = 128 * 1024;
+    auto& board = Board::GetInstance();
+    auto* codec = board.GetAudioCodec();
+    auto* display = board.GetDisplay();
+    auto* network = board.GetNetwork();
+    std::vector<MusicLyricLine> lyrics;
+
+    if (lyric.empty() && !lyric_url.empty()) {
+        auto lyric_http = network->CreateHttp(4);
+        if (lyric_http) {
+            lyric_http->SetTimeout(3000);
+            lyric_http->SetHeader("Accept", "text/plain, application/octet-stream");
+            lyric_http->SetHeader("Accept-Encoding", "identity");
+            if (lyric_http->Open("GET", lyric_url) && lyric_http->GetStatusCode() >= 200 &&
+                lyric_http->GetStatusCode() < 300) {
+                char buffer[1024];
+                while (!stop_music_playback_.load() && lyric.size() < kMaxLyricBytes) {
+                    const int size = lyric_http->Read(buffer, sizeof(buffer));
+                    if (size <= 0) {
+                        break;
+                    }
+                    const size_t accepted =
+                        std::min<size_t>(static_cast<size_t>(size), kMaxLyricBytes - lyric.size());
+                    lyric.append(buffer, accepted);
+                }
+            }
+            lyric_http->Close();
+        }
+    }
+    if (!lyric.empty()) {
+        lyrics = ParseMusicLrc(lyric);
+        if (lyrics.empty()) {
+            UpdateMusicLyric(lyric);
+        }
+    }
+
+    bool decoder_registered = false;
+    bool simple_decoder_registered = false;
+    bool playback_finished = false;
+    bool playback_failed = false;
+    esp_audio_simple_dec_handle_t decoder = nullptr;
+    esp_ae_rate_cvt_handle_t resampler = nullptr;
+    uint8_t* input_buffer = nullptr;
+    uint8_t* output_buffer = nullptr;
+    int output_buffer_size = 8192;
+    int stream_sample_rate = codec->output_sample_rate();
+    int stream_channels = codec->output_channels();
+    size_t total_output_samples = 0;
+    uint32_t total_duration_ms =
+        lyrics.empty() ? 0 : std::max<uint32_t>(lyrics.back().time_ms + 5000, 1);
+    size_t current_lyric_index = 0;
+    size_t displayed_lyric_index = std::numeric_limits<size_t>::max();
+    uint32_t last_ui_progress_ms = 0;
+    auto http = network->CreateHttp(3);
+
+    do {
+        if (!http) {
+            playback_failed = true;
+            break;
+        }
+        http->SetTimeout(2000);
+        http->SetHeader("Accept", "audio/mpeg, audio/mp3, application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity");
+        if (!http->Open("GET", url) || http->GetStatusCode() < 200 ||
+            http->GetStatusCode() >= 300) {
+            playback_failed = true;
+            break;
+        }
+        const size_t body_length = http->GetBodyLength();
+
+        if (esp_audio_dec_register_default() != ESP_AUDIO_ERR_OK) {
+            playback_failed = true;
+            break;
+        }
+        decoder_registered = true;
+        if (esp_audio_simple_dec_register_default() != ESP_AUDIO_ERR_OK) {
+            playback_failed = true;
+            break;
+        }
+        simple_decoder_registered = true;
+        esp_audio_simple_dec_cfg_t decoder_config = {
+            .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3,
+            .dec_cfg = nullptr,
+            .cfg_size = 0,
+            .use_frame_dec = false,
+        };
+        if (esp_audio_simple_dec_open(&decoder_config, &decoder) != ESP_AUDIO_ERR_OK ||
+            decoder == nullptr) {
+            playback_failed = true;
+            break;
+        }
+
+        input_buffer = static_cast<uint8_t*>(heap_caps_malloc(kReadBufferSize, MALLOC_CAP_8BIT));
+        output_buffer =
+            static_cast<uint8_t*>(heap_caps_malloc(output_buffer_size, MALLOC_CAP_8BIT));
+        if (input_buffer == nullptr || output_buffer == nullptr) {
+            playback_failed = true;
+            break;
+        }
+
+        int empty_reads = 0;
+        while (!stop_music_playback_.load()) {
+            const int read_size =
+                http->Read(reinterpret_cast<char*>(input_buffer), kReadBufferSize);
+            if (read_size < 0) {
+                playback_failed = true;
+                break;
+            }
+            if (read_size == 0) {
+                if (++empty_reads >= 3) {
+                    playback_finished = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            empty_reads = 0;
+            esp_audio_simple_dec_raw_t raw = {
+                .buffer = input_buffer,
+                .len = static_cast<uint32_t>(read_size),
+                .eos = false,
+                .consumed = 0,
+                .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
+            };
+
+            while (raw.len > 0 && !stop_music_playback_.load()) {
+                esp_audio_simple_dec_out_t output = {
+                    .buffer = output_buffer,
+                    .len = static_cast<uint32_t>(output_buffer_size),
+                    .needed_size = 0,
+                    .decoded_size = 0,
+                };
+                const auto decode_result = esp_audio_simple_dec_process(decoder, &raw, &output);
+                if (decode_result == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+                    auto* resized = static_cast<uint8_t*>(
+                        heap_caps_realloc(output_buffer, output.needed_size, MALLOC_CAP_8BIT));
+                    if (resized == nullptr) {
+                        playback_failed = true;
+                        break;
+                    }
+                    output_buffer = resized;
+                    output_buffer_size = static_cast<int>(output.needed_size);
+                    continue;
+                }
+                if (decode_result != ESP_AUDIO_ERR_OK) {
+                    playback_failed = true;
+                    break;
+                }
+                const uint32_t consumed = raw.consumed;
+
+                if (output.decoded_size > 0) {
+                    esp_audio_simple_dec_info_t decoder_info = {};
+                    if (esp_audio_simple_dec_get_info(decoder, &decoder_info) == ESP_AUDIO_ERR_OK) {
+                        stream_sample_rate = static_cast<int>(decoder_info.sample_rate);
+                        stream_channels = std::max(1, static_cast<int>(decoder_info.channel));
+                        if (body_length > 0 && decoder_info.bitrate > 0) {
+                            total_duration_ms = static_cast<uint32_t>(std::min<uint64_t>(
+                                static_cast<uint64_t>(body_length) * 8000 / decoder_info.bitrate,
+                                std::numeric_limits<uint32_t>::max()));
+                        }
+                    }
+
+                    std::vector<int16_t> pcm(output.decoded_size / sizeof(int16_t));
+                    std::memcpy(pcm.data(), output.buffer, output.decoded_size);
+                    if (stream_channels == 2 && codec->output_channels() == 1) {
+                        std::vector<int16_t> mono(pcm.size() / 2);
+                        for (size_t index = 0; index < mono.size(); ++index) {
+                            const size_t source = index * 2;
+                            mono[index] = static_cast<int16_t>(
+                                (static_cast<int32_t>(pcm[source]) + pcm[source + 1]) / 2);
+                        }
+                        pcm = std::move(mono);
+                    } else if (stream_channels == 1 && codec->output_channels() == 2) {
+                        std::vector<int16_t> stereo(pcm.size() * 2);
+                        for (size_t index = 0; index < pcm.size(); ++index) {
+                            stereo[index * 2] = pcm[index];
+                            stereo[index * 2 + 1] = pcm[index];
+                        }
+                        pcm = std::move(stereo);
+                    }
+
+                    if (stream_sample_rate != codec->output_sample_rate()) {
+                        if (resampler == nullptr) {
+                            esp_ae_rate_cvt_cfg_t config = {
+                                .src_rate = static_cast<uint32_t>(stream_sample_rate),
+                                .dest_rate = static_cast<uint32_t>(codec->output_sample_rate()),
+                                .channel = static_cast<uint8_t>(codec->output_channels()),
+                                .bits_per_sample = ESP_AUDIO_BIT16,
+                                .complexity = 2,
+                                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
+                            };
+                            esp_ae_rate_cvt_open(&config, &resampler);
+                            if (resampler == nullptr) {
+                                playback_failed = true;
+                                break;
+                            }
+                        }
+                        const uint32_t input_samples =
+                            static_cast<uint32_t>(pcm.size() / codec->output_channels());
+                        uint32_t max_output_samples = 0;
+                        esp_ae_rate_cvt_get_max_out_sample_num(resampler, input_samples,
+                                                               &max_output_samples);
+                        std::vector<int16_t> converted(max_output_samples *
+                                                       codec->output_channels());
+                        uint32_t actual_output_samples = max_output_samples;
+                        esp_ae_rate_cvt_process(
+                            resampler, reinterpret_cast<esp_ae_sample_t>(pcm.data()), input_samples,
+                            reinterpret_cast<esp_ae_sample_t>(converted.data()),
+                            &actual_output_samples);
+                        converted.resize(actual_output_samples * codec->output_channels());
+                        pcm = std::move(converted);
+                    }
+
+                    if (!pcm.empty() && !stop_music_playback_.load()) {
+                        if (!codec->output_enabled()) {
+                            codec->EnableOutput(true);
+                        }
+                        codec->OutputData(pcm);
+                        total_output_samples += pcm.size();
+                        const uint32_t position_ms = static_cast<uint32_t>(
+                            static_cast<uint64_t>(total_output_samples) * 1000 /
+                            (codec->output_sample_rate() * codec->output_channels()));
+                        music_progress_ms_.store(position_ms);
+                        music_total_ms_.store(total_duration_ms);
+                        if (position_ms - last_ui_progress_ms >= 500) {
+                            last_ui_progress_ms = position_ms;
+                            display->SetMusicProgress(position_ms, total_duration_ms);
+                        }
+                        if (!lyrics.empty()) {
+                            while (current_lyric_index + 1 < lyrics.size() &&
+                                   lyrics[current_lyric_index + 1].time_ms <= position_ms) {
+                                ++current_lyric_index;
+                            }
+                            if (lyrics[current_lyric_index].time_ms <= position_ms &&
+                                current_lyric_index != displayed_lyric_index) {
+                                displayed_lyric_index = current_lyric_index;
+                                const std::string previous =
+                                    current_lyric_index > 0 ? lyrics[current_lyric_index - 1].text
+                                                            : "";
+                                const std::string next = current_lyric_index + 1 < lyrics.size()
+                                                             ? lyrics[current_lyric_index + 1].text
+                                                             : "";
+                                UpdateMusicLyric(previous + "\n" +
+                                                 lyrics[current_lyric_index].text + "\n" + next);
+                            }
+                        }
+                    }
+                }
+
+                if (consumed == 0) {
+                    break;
+                }
+                raw.len -= std::min(raw.len, consumed);
+                raw.buffer += consumed;
+            }
+            if (playback_failed) {
+                break;
+            }
+        }
+    } while (false);
+
+    if (http) {
+        http->Close();
+    }
+    if (resampler != nullptr) {
+        esp_ae_rate_cvt_close(resampler);
+    }
+    heap_caps_free(input_buffer);
+    heap_caps_free(output_buffer);
+    if (decoder != nullptr) {
+        esp_audio_simple_dec_close(decoder);
+    }
+    if (simple_decoder_registered) {
+        esp_audio_simple_dec_unregister_default();
+    }
+    if (decoder_registered) {
+        esp_audio_dec_unregister_default();
+    }
+    audio_service_.SetExternalPlaybackActive(false);
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+
+    const bool stopped = stop_music_playback_.load();
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        music_playing_.store(false);
+        stop_music_playback_.store(false);
+        music_playback_task_handle_ = nullptr;
+        current_music_url_.clear();
+    }
+    if (stopped) {
+        return;
+    }
+    Schedule([display, playback_finished, playback_failed, title, artist]() {
+        if (playback_failed) {
+            display->SetMusicInfo(title.c_str(), artist.c_str());
+            display->SetMusicLyric("播放失败：请检查音乐直链或网络");
+            display->SetMusicProgress(0, 0);
+            return;
+        }
+        if (playback_finished) {
+            display->SetMusicLyric("");
+            display->SetMusicProgress(0, 0);
+            display->SwitchToWeatherPage();
+        }
+    });
+}
+
+void Application::UpdateMusicLyric(const std::string& lyric) {
+    Schedule([lyric]() {
+        auto* display = Board::GetInstance().GetDisplay();
+        display->SwitchToMusicPage();
+        display->SetMusicLyric(lyric.c_str());
+    });
+}
+
+void Application::StopMusicPlayback(bool return_to_weather) {
+    if (!music_playing_.load()) {
+        if (return_to_weather) {
+            Schedule([]() { Board::GetInstance().GetDisplay()->SwitchToWeatherPage(); });
+        }
+        return;
+    }
+    stop_music_playback_.store(true);
+    if (return_to_weather) {
+        Schedule([]() {
+            auto* display = Board::GetInstance().GetDisplay();
+            display->SetMusicLyric("");
+            display->SetMusicProgress(0, 0);
+            display->SwitchToWeatherPage();
+        });
+    }
+}
+
 void Application::ResetProtocol() {
+    StopMusicPlayback();
     Schedule([this]() {
         if (GetDeviceState() == kDeviceStateNotifying) {
             StopNotification();

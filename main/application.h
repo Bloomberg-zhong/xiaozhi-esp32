@@ -6,12 +6,13 @@
 #include <freertos/task.h>
 #include <esp_timer.h>
 
-#include <string>
-#include <mutex>
-#include <deque>
-#include <memory>
-#include <functional>
+#include <atomic>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #include "protocol.h"
@@ -117,6 +118,11 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
+    bool PlayMusicFromUrl(const std::string& url, const std::string& title,
+                          const std::string& artist, const std::string& lyric,
+                          const std::string& lyric_url = "");
+    void StopMusicPlayback(bool return_to_weather = true);
+    bool IsMusicPlaying() const { return music_playing_.load(); }
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
@@ -142,6 +148,13 @@ private:
     AudioService audio_service_;
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;
+    std::atomic<bool> music_playing_{false};
+    std::atomic<bool> stop_music_playback_{false};
+    std::atomic<uint32_t> music_progress_ms_{0};
+    std::atomic<uint32_t> music_total_ms_{0};
+    TaskHandle_t music_playback_task_handle_ = nullptr;
+    std::mutex music_playback_mutex_;
+    std::string current_music_url_;
     std::unique_ptr<Ota> ota_;
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
@@ -172,6 +185,11 @@ private:
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
+    void StartMusicPlayback(std::string url, std::string title, std::string artist,
+                            std::string lyric, std::string lyric_url);
+    void MusicPlaybackTask(std::string url, std::string title, std::string artist,
+                           std::string lyric, std::string lyric_url);
+    void UpdateMusicLyric(const std::string& lyric);
 
     // Activation task (runs in background)
     void ActivationTask();
