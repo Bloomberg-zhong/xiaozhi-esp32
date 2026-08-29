@@ -1,5 +1,6 @@
 #include "dashboard_model.h"
 #include "music_gateway_model.h"
+#include "rlcd_flush_coordinator.h"
 
 #include <cassert>
 #include <ctime>
@@ -205,6 +206,20 @@ void TestMusicGatewayPlaybackUrls() {
            "91%A8%E6%9D%B0%E4%BC%A6&source=netease&duration=223");
 }
 
+void TestDisplayFlushWaitsForDmaCompletion() {
+    RlcdFlushCoordinator coordinator;
+
+    assert(coordinator.BeginFlush());
+    assert(coordinator.IsFlushInFlight());
+    assert(!coordinator.BeginFlush());
+
+    assert(coordinator.CompleteFlush());
+    assert(!coordinator.IsFlushInFlight());
+    assert(!coordinator.CompleteFlush());
+
+    assert(coordinator.BeginFlush());
+}
+
 }  // namespace
 
 int main() {
@@ -219,5 +234,6 @@ int main() {
     TestMusicProgressClamping();
     TestMusicGatewayUrlConstruction();
     TestMusicGatewayPlaybackUrls();
+    TestDisplayFlushWaitsForDmaCompletion();
     return 0;
 }

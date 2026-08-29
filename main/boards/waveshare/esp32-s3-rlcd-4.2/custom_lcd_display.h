@@ -6,6 +6,7 @@
 #include <string>
 #include "dashboard_model.h"
 #include "lcd_display.h"
+#include "rlcd_flush_coordinator.h"
 
 enum ColorSelection { ColorBlack = 0, ColorWhite = 0xff };
 
@@ -42,6 +43,10 @@ private:
     void RLCD_Sendbuffera(uint8_t* Data, int len);
     void RLCD_Reset(void);
     static void Lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* color_p);
+    static bool OnColorTransferDone(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t*,
+                                    void* user_ctx);
+
+    RlcdFlushCoordinator flush_coordinator_;
 
     lv_obj_t* assistant_page_ = nullptr;
     lv_obj_t* dashboard_page_ = nullptr;

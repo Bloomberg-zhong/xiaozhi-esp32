@@ -24,6 +24,7 @@ class RlcdDashboardLogicTests(unittest.TestCase):
                     str(CPP_TEST),
                     str(BOARD_DIR / "dashboard_model.cc"),
                     str(BOARD_DIR / "music_gateway_model.cc"),
+                    str(BOARD_DIR / "rlcd_flush_coordinator.cc"),
                     "-o",
                     str(executable),
                 ],

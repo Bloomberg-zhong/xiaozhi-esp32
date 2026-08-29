@@ -145,6 +145,9 @@ void LvglDisplay::SetStatus(const char* status) {
         ESP_LOGW(TAG, "SetStatus('%s') called before SetupUI() - message will be lost!", status);
     }
     DisplayLockGuard lock(this);
+    if (!lock) {
+        return;
+    }
     if (status_label_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG,

@@ -352,6 +352,9 @@ void CustomLcdDisplay::SetStatus(const char* status) {
         rlcd_dashboard::SelectDashboardPage(ToAssistantUiState(application.GetDeviceState()),
                                             application.IsMusicPlaying(), preferred_idle_page_);
     DisplayLockGuard lock(this);
+    if (!lock) {
+        return;
+    }
     ShowPageLocked(page);
 }
 

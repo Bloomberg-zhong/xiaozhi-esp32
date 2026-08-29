@@ -16,6 +16,10 @@ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area
 {
     assert(disp != NULL);
     CustomLcdDisplay *Disp = (CustomLcdDisplay *)lv_display_get_user_data(disp);
+    if (!Disp->flush_coordinator_.BeginFlush()) {
+        ESP_LOGE(Disp->TAG, "Tried to start an RLCD flush while DMA is still active");
+        return;
+    }
     uint16_t *buffer = (uint16_t *)color_p;
   	for(int y = area->y1; y <= area->y2; y++)
   	{
@@ -27,7 +31,15 @@ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area
   	 	}
   	}
   	Disp->RLCD_Display();
-	lv_disp_flush_ready(disp);
+}
+
+bool CustomLcdDisplay::OnColorTransferDone(esp_lcd_panel_io_handle_t,
+                                           esp_lcd_panel_io_event_data_t*, void* user_ctx) {
+    auto* display = static_cast<CustomLcdDisplay*>(user_ctx);
+    if (display != nullptr && display->flush_coordinator_.CompleteFlush()) {
+        lv_disp_flush_ready(display->display_);
+    }
+    return false;
 }
 
 CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
@@ -68,7 +80,7 @@ height_(height)
     io_config.lcd_cmd_bits = 8;
     io_config.lcd_param_bits = 8;
     io_config.spi_mode = 0;
-    io_config.trans_queue_depth = 7;
+    io_config.trans_queue_depth = 1;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)spi_host, &io_config, &io_handle));
     gpio_config_t gpio_conf = {};
     gpio_conf.intr_type     = GPIO_INTR_DISABLE;
@@ -103,7 +115,11 @@ height_(height)
     display_ = lv_display_create(width, height); /* 以水平和垂直分辨率（像素）进行基本初始化 */
     lv_display_set_flush_cb(display_, Lvgl_flush_cb);
     lv_display_set_user_data(display_, this);
-	size_t lvgl_buffer_size = LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) * transfer;
+    const esp_lcd_panel_io_callbacks_t io_callbacks = {
+        .on_color_trans_done = OnColorTransferDone,
+    };
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &io_callbacks, this));
+    size_t lvgl_buffer_size = LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) * transfer;
 	uint8_t *lvgl_buffer1 = (uint8_t *) heap_caps_malloc(lvgl_buffer_size, MALLOC_CAP_SPIRAM);
     assert(lvgl_buffer1);
 	lv_display_set_buffers(display_, lvgl_buffer1, NULL, lvgl_buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);

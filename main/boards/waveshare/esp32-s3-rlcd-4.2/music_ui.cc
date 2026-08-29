@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "dashboard_model.h"
-#include "lvgl_theme.h"
 
 namespace {
 
@@ -53,8 +52,6 @@ std::vector<std::string> SplitLyricLines(const char* text) {
 
 void CustomLcdDisplay::SetupMusicUI() {
     auto* screen = lv_screen_active();
-    auto* theme = static_cast<LvglTheme*>(current_theme_);
-    auto* text_font = theme->text_font()->font();
 
     music_page_ = lv_obj_create(screen);
     lv_obj_set_pos(music_page_, 0, 0);
@@ -106,7 +103,6 @@ void CustomLcdDisplay::SetupMusicUI() {
 
     music_title_label_ = lv_label_create(info_card);
     lv_obj_set_width(music_title_label_, 198);
-    lv_obj_set_style_text_font(music_title_label_, text_font, 0);
     lv_obj_set_style_text_color(music_title_label_, lv_color_black(), 0);
     lv_label_set_long_mode(music_title_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(music_title_label_, "未播放");
@@ -114,7 +110,6 @@ void CustomLcdDisplay::SetupMusicUI() {
 
     music_artist_label_ = lv_label_create(info_card);
     lv_obj_set_width(music_artist_label_, 198);
-    lv_obj_set_style_text_font(music_artist_label_, text_font, 0);
     lv_obj_set_style_text_color(music_artist_label_, lv_color_black(), 0);
     lv_label_set_long_mode(music_artist_label_, LV_LABEL_LONG_DOT);
     lv_label_set_text(music_artist_label_, "未知歌手");
@@ -136,7 +131,6 @@ void CustomLcdDisplay::SetupMusicUI() {
                                 music_lyric_next_label_};
     for (int index = 0; index < 3; ++index) {
         lv_obj_set_width(lyric_labels[index], 198);
-        lv_obj_set_style_text_font(lyric_labels[index], text_font, 0);
         lv_obj_set_style_text_color(lyric_labels[index], lv_color_black(), 0);
         lv_label_set_long_mode(lyric_labels[index],
                                index == 1 ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
@@ -164,7 +158,6 @@ void CustomLcdDisplay::SetupMusicUI() {
     music_progress_label_ = lv_label_create(music_page_);
     lv_obj_set_pos(music_progress_label_, 296, 190);
     lv_obj_set_width(music_progress_label_, 92);
-    lv_obj_set_style_text_font(music_progress_label_, text_font, 0);
     lv_obj_set_style_text_color(music_progress_label_, lv_color_white(), 0);
     lv_obj_set_style_text_align(music_progress_label_, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_text(music_progress_label_, "00:00 / --:--");
@@ -177,7 +170,6 @@ void CustomLcdDisplay::SetupMusicUI() {
     auto* ai_title = lv_label_create(ai_card);
     lv_obj_set_pos(ai_title, 4, 3);
     lv_obj_set_width(ai_title, 64);
-    lv_obj_set_style_text_font(ai_title, text_font, 0);
     lv_obj_set_style_text_color(ai_title, lv_color_black(), 0);
     lv_obj_set_style_text_align(ai_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(ai_title, "小智");
@@ -194,7 +186,6 @@ void CustomLcdDisplay::SetupMusicUI() {
     music_ai_status_label_ = lv_label_create(ai_card);
     lv_obj_set_pos(music_ai_status_label_, 90, 4);
     lv_obj_set_width(music_ai_status_label_, 264);
-    lv_obj_set_style_text_font(music_ai_status_label_, text_font, 0);
     lv_obj_set_style_text_color(music_ai_status_label_, lv_color_black(), 0);
     lv_label_set_long_mode(music_ai_status_label_, LV_LABEL_LONG_WRAP);
     lv_label_set_text(music_ai_status_label_, "待命 · 说出歌名即可播放");
