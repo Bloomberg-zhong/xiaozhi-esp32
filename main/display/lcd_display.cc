@@ -459,6 +459,13 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(battery_label_, icon_font, 0);
     lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
+#if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
+    battery_level_label_ = lv_label_create(right_icons);
+    lv_label_set_text(battery_level_label_, "--%");
+    lv_obj_set_style_text_font(battery_level_label_, text_font, 0);
+    lv_obj_set_style_text_color(battery_level_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_margin_left(battery_level_label_, lvgl_theme->spacing(1), 0);
+#endif
 
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
@@ -977,11 +984,13 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
 #if CONFIG_USE_MULTILINE_CHAT_MESSAGE || CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
-    /* Bottom chat panel - RLCD keeps a fixed two-line cap for streamed subtitles. */
+    /* Bottom chat panel - RLCD reserves room for streamed, wrapped subtitles. */
     bottom_bar_ = lv_obj_create(screen);
     lv_obj_set_width(bottom_bar_, LV_HOR_RES);
 #if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
-    const lv_coord_t chat_panel_height = text_font->line_height * 2 + lvgl_theme->spacing(8);
+    constexpr lv_coord_t chat_panel_lines = 4;
+    const lv_coord_t chat_message_height = text_font->line_height * chat_panel_lines;
+    const lv_coord_t chat_panel_height = chat_message_height + lvgl_theme->spacing(8);
     lv_obj_set_height(bottom_bar_, chat_panel_height);
 #else
     lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
@@ -1000,7 +1009,7 @@ void LcdDisplay::SetupUI() {
     lv_label_set_text(chat_message_label_, "");
     lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8));
 #if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
-    lv_obj_set_height(chat_message_label_, text_font->line_height * 2);
+    lv_obj_set_height(chat_message_label_, chat_message_height);
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_align(chat_message_label_, LV_ALIGN_TOP_LEFT, 0, 0);

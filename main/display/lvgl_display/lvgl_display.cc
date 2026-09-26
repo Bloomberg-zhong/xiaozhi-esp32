@@ -135,6 +135,9 @@ LvglDisplay::~LvglDisplay() {
     if (battery_label_ != nullptr) {
         lv_obj_del(battery_label_);
     }
+    if (battery_level_label_ != nullptr) {
+        lv_obj_del(battery_level_label_);
+    }
     if (low_battery_popup_ != nullptr) {
         lv_obj_del(low_battery_popup_);
     }
@@ -266,6 +269,15 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             battery_icon_ = icon;
             lv_label_set_text(battery_label_, battery_icon_);
         }
+#if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
+        if (battery_level_label_ != nullptr) {
+            char level_text[8];
+            snprintf(level_text, sizeof(level_text), "%d%%", std::clamp(battery_level, 0, 100));
+            if (strcmp(lv_label_get_text(battery_level_label_), level_text) != 0) {
+                lv_label_set_text(battery_level_label_, level_text);
+            }
+        }
+#endif
 
         // Check low battery popup only when clock tick event is triggered
         // Because when initializing, the battery level is not ready yet.

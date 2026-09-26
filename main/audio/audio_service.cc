@@ -350,6 +350,14 @@ void AudioService::AudioOutputTask() {
 
         codec_->OutputData(task.pcm);
 
+        if (task.pcm.capacity() <= 32768) {
+            std::lock_guard<std::mutex> pool_lock(audio_queue_mutex_);
+            if (playback_pcm_buffer_pool_.size() < 2) {
+                task.pcm.clear();
+                playback_pcm_buffer_pool_.push_back(std::move(task.pcm));
+            }
+        }
+
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
@@ -658,6 +666,19 @@ bool AudioService::PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, bool wait)
     return true;
 }
 
+std::vector<int16_t> AudioService::AcquirePlaybackPcmBuffer(size_t sample_count) {
+    std::vector<int16_t> buffer;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (!playback_pcm_buffer_pool_.empty()) {
+            buffer = std::move(playback_pcm_buffer_pool_.back());
+            playback_pcm_buffer_pool_.pop_back();
+        }
+    }
+    buffer.resize(sample_count);
+    return buffer;
+}
+
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     if (audio_send_queue_.empty()) {
@@ -883,8 +904,9 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     }
     if (!external_playback_active_.load() && output_elapsed > AUDIO_POWER_TIMEOUT_MS &&
         codec_->output_enabled()) {
-        // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
-        if (!(codec_->duplex() && codec_->input_enabled())) {
+        // Keep TX clock when duplex RX is active unless this codec has independent power paths.
+        if (!(codec_->duplex() && codec_->input_enabled()) ||
+            codec_->CanDisableOutputWhileInputActive()) {
             codec_->EnableOutput(false);
         }
     }

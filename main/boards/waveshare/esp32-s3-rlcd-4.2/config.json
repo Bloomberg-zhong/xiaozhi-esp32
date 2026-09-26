@@ -8,7 +8,9 @@
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
                 "CONFIG_USE_DEVICE_AEC=y",
-                "CONFIG_LV_FONT_MONTSERRAT_48=y"
+                "CONFIG_LV_FONT_MONTSERRAT_48=y",
+                "CONFIG_FATFS_API_ENCODING_UTF_8=y",
+                "CONFIG_FATFS_CODEPAGE_936=y"
             ]
         }
     ]

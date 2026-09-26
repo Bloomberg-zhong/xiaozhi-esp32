@@ -15,12 +15,13 @@
 #include <string>
 #include <vector>
 
-#include "protocol.h"
-#include "ota.h"
 #include "audio_service.h"
+#include "boards/common/music_storage.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "notify/notify_player.h"
+#include "ota.h"
+#include "protocol.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -121,7 +122,16 @@ public:
     void PlaySound(const std::string_view& sound);
     bool PlayMusicFromUrl(const std::string& url, const std::string& title,
                           const std::string& artist, const std::string& lyric,
-                          const std::string& lyric_url = "");
+                          const std::string& lyric_url = "", const std::string& cache_key = "");
+    bool ReplaceMusicFromUrl(const std::string& url, const std::string& title,
+                             const std::string& artist, const std::string& lyric_url,
+                             const std::string& cache_key);
+    bool PlayLocalMusic(const std::vector<MusicFile>& tracks, size_t index = 0);
+    void PauseMusicPlayback();
+    void ResumeMusicPlayback();
+    void ToggleMusicPlayback();
+    bool NextMusicTrack();
+    bool PreviousMusicTrack();
     void StopMusicPlayback(bool return_to_weather = true);
     bool IsMusicPlaying() const { return music_playing_.load(); }
     AudioService& GetAudioService() { return audio_service_; }
@@ -151,11 +161,22 @@ private:
     uint32_t notification_playback_id_ = 0;
     std::atomic<bool> music_playing_{false};
     std::atomic<bool> stop_music_playback_{false};
+    std::atomic<bool> music_paused_{false};
+    std::atomic<int> music_skip_request_{0};
     std::atomic<uint32_t> music_progress_ms_{0};
     std::atomic<uint32_t> music_total_ms_{0};
     TaskHandle_t music_playback_task_handle_ = nullptr;
     std::mutex music_playback_mutex_;
     std::string current_music_url_;
+    std::string current_music_file_path_;
+    std::string current_music_cache_key_;
+    std::vector<MusicFile> local_music_playlist_;
+    size_t local_music_index_ = 0;
+    std::string pending_music_url_;
+    std::string pending_music_title_;
+    std::string pending_music_artist_;
+    std::string pending_music_lyric_url_;
+    std::string pending_music_cache_key_;
     std::unique_ptr<Ota> ota_;
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
@@ -186,10 +207,15 @@ private:
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
-    void StartMusicPlayback(std::string url, std::string title, std::string artist,
-                            std::string lyric, std::string lyric_url);
-    void MusicPlaybackTask(std::string url, std::string title, std::string artist,
-                           std::string lyric, std::string lyric_url);
+    void StartMusicPlayback(std::string url, std::string file_path, std::string cache_key,
+                            std::string title, std::string artist, std::string lyric,
+                            std::string lyric_url);
+    void MusicPlaybackTask(std::string url, std::string file_path, std::string cache_key,
+                           std::string title, std::string artist, std::string lyric,
+                           std::string lyric_url);
+    bool PlayMusicFile(const std::string& path, const std::string& title, const std::string& artist,
+                       const std::string& cache_key, std::vector<MusicFile> playlist,
+                       size_t playlist_index);
     void UpdateMusicLyric(const std::string& lyric);
 
     // Activation task (runs in background)

@@ -13,10 +13,20 @@
 #include "lvgl.h"
 #include "mcp_server.h"
 #include "music_gateway_client.h"
+#include "music_storage.h"
 #include "wifi_board.h"
 #include "wifi_station.h"
 
 #define TAG "waveshare_rlcd_4_2"
+
+MusicStorage* CreateRlcdMusicStorage();
+
+class RlcdAudioCodec : public BoxAudioCodec {
+public:
+    using BoxAudioCodec::BoxAudioCodec;
+
+    bool CanDisableOutputWhileInputActive() const override { return true; }
+};
 
 class CustomBoard : public WifiBoard {
 private:
@@ -24,6 +34,7 @@ private:
     Button boot_button_;
     Button user_button_;
     CustomLcdDisplay* display_ = nullptr;
+    MusicStorage* music_storage_ = nullptr;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
     bool vbat_status = 0;
@@ -62,11 +73,28 @@ private:
 
         user_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() != kDeviceStateIdle || display_ == nullptr) {
+            if (app.GetDeviceState() != kDeviceStateIdle) {
                 return;
             }
+            if (app.IsMusicPlaying()) {
+                app.ToggleMusicPlayback();
+                return;
+            }
+            if (music_storage_ != nullptr) {
+                std::string error;
+                const auto tracks = music_storage_->ListChildrenMusic(error);
+                if (!tracks.empty()) {
+                    app.PlayLocalMusic(tracks, 0);
+                    return;
+                }
+            }
+            if (display_ == nullptr)
+                return;
             app.Schedule([display = display_]() { display->ToggleHomeMusicPage(); });
         });
+
+        user_button_.OnDoubleClick([this]() { Application::GetInstance().NextMusicTrack(); });
+        user_button_.OnLongPress([this]() { Application::GetInstance().PreviousMusicTrack(); });
     }
 
     void InitializeTools() {
@@ -246,7 +274,7 @@ private:
                 if (!McpServer::GetInstance().RunIfCurrentWorkerCall([&playback, &started]() {
                         started = Application::GetInstance().PlayMusicFromUrl(
                             playback->audio_url, playback->song.name, playback->song.artist, "",
-                            playback->lyric_url);
+                            playback->lyric_url, playback->song.source + ":" + playback->song.id);
                     })) {
                     return std::string("音乐播放请求已取消");
                 }
@@ -286,6 +314,95 @@ private:
                                Application::GetInstance().StopMusicPlayback();
                                return std::string("音乐已停止");
                            });
+
+        mcp_server.AddTool(
+            "self.music.local.play", "播放 TF 卡 儿童音乐 文件夹中的 MP3 歌曲。",
+            PropertyList({Property("index", kPropertyTypeInteger, 1, 1, 256)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (music_storage_ == nullptr) {
+                    return std::string("TF 卡存储不可用");
+                }
+                std::string error;
+                const auto tracks = music_storage_->ListChildrenMusic(error);
+                if (tracks.empty())
+                    return error;
+                const int index = properties["index"].value<int>() - 1;
+                if (index < 0 || static_cast<size_t>(index) >= tracks.size()) {
+                    return std::string("歌曲序号超出曲库范围，共 ") +
+                           std::to_string(tracks.size()) + " 首";
+                }
+                return Application::GetInstance().PlayLocalMusic(tracks, index)
+                           ? ReturnValue(std::string("开始播放：") + tracks[index].title)
+                           : ReturnValue(std::string("音乐播放启动失败"));
+            });
+
+        mcp_server.AddTool(
+            "self.music.local.search", "按歌名查找 TF 卡 儿童音乐 文件夹中的歌曲。",
+            PropertyList({Property("query", kPropertyTypeString)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (music_storage_ == nullptr)
+                    return std::string("TF 卡存储不可用");
+                std::string error;
+                const auto tracks = music_storage_->ListChildrenMusic(error);
+                if (tracks.empty())
+                    return error;
+                const auto& query = properties["query"].value<std::string>();
+                std::string result;
+                for (size_t index = 0; index < tracks.size(); ++index) {
+                    if (query.empty() || tracks[index].title.find(query) != std::string::npos) {
+                        result += std::to_string(index + 1) + ". " + tracks[index].title + "\n";
+                    }
+                }
+                return result.empty() ? ReturnValue(std::string("没有找到这首歌"))
+                                      : ReturnValue(std::string("本地歌曲：\n") + result);
+            });
+
+        mcp_server.AddTool("self.music.pause", "暂停正在播放的音乐。", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               Application::GetInstance().PauseMusicPlayback();
+                               return std::string("音乐已暂停");
+                           });
+        mcp_server.AddTool("self.music.resume", "继续播放已暂停的音乐。", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               Application::GetInstance().ResumeMusicPlayback();
+                               return std::string("继续播放音乐");
+                           });
+        auto add_relative_music_tool = [&mcp_server](const char* name, const char* description,
+                                                     int offset) {
+            mcp_server.AddWorkerTool(
+                name, description, PropertyList(), [offset](const PropertyList&) -> ReturnValue {
+                    auto& application = Application::GetInstance();
+                    if (offset > 0 ? application.NextMusicTrack()
+                                   : application.PreviousMusicTrack()) {
+                        return offset > 0 ? ReturnValue(std::string("切换到下一首"))
+                                          : ReturnValue(std::string("切换到上一首"));
+                    }
+
+                    std::string error;
+                    auto playback =
+                        rlcd_dashboard::MusicGatewayClient::Instance().ResolveRelativePlayback(
+                            offset, error);
+                    if (!playback.has_value())
+                        return error;
+
+                    bool started = false;
+                    if (!McpServer::GetInstance().RunIfCurrentWorkerCall(
+                            [&application, &playback, &started]() {
+                                started = application.ReplaceMusicFromUrl(
+                                    playback->audio_url, playback->song.name, playback->song.artist,
+                                    playback->lyric_url,
+                                    playback->song.source + ":" + playback->song.id);
+                            })) {
+                        return std::string("音乐切换请求已取消");
+                    }
+                    if (!started)
+                        return std::string("音乐切换失败，请稍后重试");
+                    return std::string(offset > 0 ? "正在播放下一首：" : "正在播放上一首：") +
+                           playback->song.name;
+                });
+        };
+        add_relative_music_tool("self.music.next", "播放下一首音乐。", 1);
+        add_relative_music_tool("self.music.previous", "播放上一首音乐。", -1);
     }
 
     void InitializeLcdDisplay() {
@@ -347,7 +464,7 @@ private:
         }
 
         voltage /= 10;
-        int percent = (-1 * voltage * voltage + 9016 * voltage - 19189000) / 10000;
+        int percent = (voltage - 2500) * 100 / 1700;
         percent = (percent > 100) ? 100 : (percent < 0) ? 0 : percent;
         // ESP_LOGI(TAG, "voltage: %dmV, percentage: %d%%", voltage, percent);
         return (uint8_t)percent;
@@ -356,13 +473,14 @@ private:
 public:
     CustomBoard() : boot_button_(BOOT_BUTTON_GPIO), user_button_(USER_BUTTON_GPIO) {
         InitializeI2c();
+        music_storage_ = CreateRlcdMusicStorage();
         InitializeButtons();
         InitializeTools();
         InitializeLcdDisplay();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static BoxAudioCodec audio_codec(
+        static RlcdAudioCodec audio_codec(
             i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK,
             AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
             AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR,
@@ -371,6 +489,7 @@ public:
     }
 
     virtual Display* GetDisplay() override { return display_; }
+    virtual MusicStorage* GetMusicStorage() override { return music_storage_; }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
         // The charger STAT output drives the board's LED and is not connected to an MCU GPIO.

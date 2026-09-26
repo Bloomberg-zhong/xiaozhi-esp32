@@ -143,6 +143,7 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     bool PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, bool wait = false);
+    std::vector<int16_t> AcquirePlaybackPcmBuffer(size_t sample_count);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
@@ -181,6 +182,7 @@ private:
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
     std::mutex audio_queue_mutex_;
+    std::vector<std::vector<int16_t>> playback_pcm_buffer_pool_;
     std::condition_variable audio_queue_cv_;
     // Testing records up to AUDIO_TESTING_MAX_DURATION_MS, then swaps into the
     // decode queue. Both queues must share this capacity so swap() is valid.

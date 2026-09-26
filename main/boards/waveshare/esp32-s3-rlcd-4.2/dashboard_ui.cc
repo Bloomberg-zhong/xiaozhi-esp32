@@ -260,8 +260,8 @@ void CustomLcdDisplay::RefreshDashboard() {
         lv_label_set_text(dashboard_date_label_, date.c_str());
     }
 
-    rlcd_dashboard::BluetoothState bluetooth_state = rlcd_dashboard::BluetoothState::kDisabled;
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    rlcd_dashboard::BluetoothState bluetooth_state = rlcd_dashboard::BluetoothState::kDisabled;
     auto& blufi = Blufi::GetInstance();
     bluetooth_state = blufi.IsInitialized()
                           ? (blufi.IsBleConnected() ? rlcd_dashboard::BluetoothState::kConnected

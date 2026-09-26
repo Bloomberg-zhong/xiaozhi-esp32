@@ -1071,6 +1071,12 @@ if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
         m5stack__m5pm1
     )
 endif()
+if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        esp_driver_sdmmc
+        sdmmc
+    )
+endif()
 if(CONFIG_BOARD_TYPE_ESP_SPOT_S3 OR CONFIG_BOARD_TYPE_ESP_SPOT_C5 OR CONFIG_BOARD_TYPE_ESP_VOCAT)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         espressif__bmi270_sensor

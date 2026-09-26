@@ -27,6 +27,7 @@ public:
                                          std::string& error);
     void SetSearchResults(const std::vector<MusicGatewaySong>& songs);
     std::optional<MusicGatewayPlayback> ResolvePlayback(size_t one_based_index, std::string& error);
+    std::optional<MusicGatewayPlayback> ResolveRelativePlayback(int offset, std::string& error);
 
 private:
     MusicGatewayClient();
@@ -41,6 +42,8 @@ private:
     mutable std::mutex mutex_;
     std::string base_url_;
     std::vector<MusicGatewaySong> search_results_;
+    size_t current_search_index_ = 0;
+    bool has_current_search_index_ = false;
 };
 
 }  // namespace rlcd_dashboard

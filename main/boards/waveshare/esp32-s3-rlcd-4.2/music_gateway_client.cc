@@ -194,6 +194,8 @@ std::vector<MusicGatewaySong> MusicGatewayClient::Search(const std::string& quer
 void MusicGatewayClient::SetSearchResults(const std::vector<MusicGatewaySong>& songs) {
     std::lock_guard<std::mutex> lock(mutex_);
     search_results_ = songs;
+    current_search_index_ = 0;
+    has_current_search_index_ = false;
 }
 
 std::optional<MusicGatewayPlayback> MusicGatewayClient::ResolvePlayback(size_t one_based_index,
@@ -231,7 +233,29 @@ std::optional<MusicGatewayPlayback> MusicGatewayClient::ResolvePlayback(size_t o
     playback.audio_url = BuildMusicGatewayStreamUrl(base_url, song);
     playback.lyric_url = BuildMusicGatewayLyricUrl(base_url, song);
     playback.used_fallback = used_fallback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_search_index_ = one_based_index - 1;
+        has_current_search_index_ = true;
+    }
     return playback;
+}
+
+std::optional<MusicGatewayPlayback> MusicGatewayClient::ResolveRelativePlayback(
+    int offset, std::string& error) {
+    size_t target_index = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (search_results_.empty() || offset == 0) {
+            error = "请先搜索并播放一首在线歌曲";
+            return std::nullopt;
+        }
+        const int count = static_cast<int>(search_results_.size());
+        const int current = has_current_search_index_ ? static_cast<int>(current_search_index_)
+                                                      : (offset > 0 ? -1 : 0);
+        target_index = static_cast<size_t>((current + offset % count + count) % count);
+    }
+    return ResolvePlayback(target_index + 1, error);
 }
 
 bool MusicGatewayClient::GetJson(const std::string& url, std::string& body,

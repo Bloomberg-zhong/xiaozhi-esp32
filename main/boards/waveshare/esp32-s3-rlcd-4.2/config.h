@@ -26,6 +26,10 @@
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define USER_BUTTON_GPIO        GPIO_NUM_18
 
+#define RLCD_SD_CLK_PIN GPIO_NUM_38
+#define RLCD_SD_CMD_PIN GPIO_NUM_21
+#define RLCD_SD_D0_PIN  GPIO_NUM_39
+
 
 #define RLCD_DC_PIN    GPIO_NUM_5  
 #define RLCD_CS_PIN    GPIO_NUM_40

@@ -34,10 +34,13 @@ namespace {
 constexpr size_t kMaxMusicUrlBytes = 2048;
 constexpr size_t kMaxMusicMetadataBytes = 192;
 constexpr size_t kMaxMusicLyricBytes = 32 * 1024;
+constexpr size_t kMaxMusicCacheBytes = 512 * 1024 * 1024;
 
 struct MusicPlaybackTaskArgs {
     Application* app;
     std::string url;
+    std::string file_path;
+    std::string cache_key;
     std::string title;
     std::string artist;
     std::string lyric;
@@ -46,6 +49,17 @@ struct MusicPlaybackTaskArgs {
 
 bool IsHttpUrl(const std::string& url) {
     return url.compare(0, 7, "http://") == 0 || url.compare(0, 8, "https://") == 0;
+}
+
+std::string UrlCacheKey(const std::string& url) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : url) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    char key[32];
+    std::snprintf(key, sizeof(key), "url:%016llx", static_cast<unsigned long long>(hash));
+    return key;
 }
 
 struct MusicLyricLine {
@@ -1490,12 +1504,24 @@ void Application::PlaySound(const std::string_view& sound) { audio_service_.Play
 
 bool Application::PlayMusicFromUrl(const std::string& url, const std::string& title,
                                    const std::string& artist, const std::string& lyric,
-                                   const std::string& lyric_url) {
+                                   const std::string& lyric_url, const std::string& cache_key) {
     if (url.size() > kMaxMusicUrlBytes || lyric_url.size() > kMaxMusicUrlBytes ||
         title.size() > kMaxMusicMetadataBytes || artist.size() > kMaxMusicMetadataBytes ||
         lyric.size() > kMaxMusicLyricBytes || !IsHttpUrl(url) ||
         (!lyric_url.empty() && !IsHttpUrl(lyric_url))) {
         return false;
+    }
+    const std::string effective_cache_key = cache_key.empty() ? UrlCacheKey(url) : cache_key;
+    if (!effective_cache_key.empty()) {
+        auto* storage = Board::GetInstance().GetMusicStorage();
+        if (storage != nullptr) {
+            auto cached = storage->FindCachedPath(effective_cache_key);
+            if (cached.has_value()) {
+                std::vector<MusicFile> no_playlist;
+                return PlayMusicFile(*cached, title, artist, effective_cache_key,
+                                     std::move(no_playlist), 0);
+            }
+        }
     }
     {
         std::lock_guard<std::mutex> lock(music_playback_mutex_);
@@ -1504,22 +1530,101 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
         }
         music_playing_.store(true);
         stop_music_playback_.store(false);
+        music_paused_.store(false);
+        music_skip_request_.store(0);
         music_progress_ms_.store(0);
         music_total_ms_.store(0);
         current_music_url_ = url;
+        current_music_file_path_.clear();
+        current_music_cache_key_ = effective_cache_key;
+        local_music_playlist_.clear();
     }
-    Schedule([this, url, title, artist, lyric, lyric_url]() mutable {
-        StartMusicPlayback(std::move(url), std::move(title), std::move(artist), std::move(lyric),
-                           std::move(lyric_url));
+    Schedule([this, url, effective_cache_key, title, artist, lyric, lyric_url]() mutable {
+        StartMusicPlayback(std::move(url), {}, std::move(effective_cache_key), std::move(title),
+                           std::move(artist), std::move(lyric), std::move(lyric_url));
     });
     return true;
 }
 
-void Application::StartMusicPlayback(std::string url, std::string title, std::string artist,
-                                     std::string lyric, std::string lyric_url) {
+bool Application::ReplaceMusicFromUrl(const std::string& url, const std::string& title,
+                                      const std::string& artist, const std::string& lyric_url,
+                                      const std::string& cache_key) {
+    if (!music_playing_.load()) {
+        return PlayMusicFromUrl(url, title, artist, "", lyric_url, cache_key);
+    }
+    if (!IsHttpUrl(url) || url.size() > kMaxMusicUrlBytes || lyric_url.size() > kMaxMusicUrlBytes ||
+        title.size() > kMaxMusicMetadataBytes || artist.size() > kMaxMusicMetadataBytes ||
+        (!lyric_url.empty() && !IsHttpUrl(lyric_url))) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        if (!music_playing_.load())
+            return false;
+        pending_music_url_ = url;
+        pending_music_title_ = title;
+        pending_music_artist_ = artist;
+        pending_music_lyric_url_ = lyric_url;
+        pending_music_cache_key_ = cache_key.empty() ? UrlCacheKey(url) : cache_key;
+        music_skip_request_.store(2);
+        stop_music_playback_.store(true);
+        music_paused_.store(false);
+    }
+    audio_service_.ResetDecoder();
+    return true;
+}
+
+bool Application::PlayLocalMusic(const std::vector<MusicFile>& tracks, size_t index) {
+    if (tracks.empty() || index >= tracks.size() || music_playing_.load()) {
+        return false;
+    }
+    return PlayMusicFile(tracks[index].path, tracks[index].title, "本地音乐", {}, tracks, index);
+}
+
+bool Application::PlayMusicFile(const std::string& path, const std::string& title,
+                                const std::string& artist, const std::string& cache_key,
+                                std::vector<MusicFile> playlist, size_t playlist_index) {
+    auto* storage = Board::GetInstance().GetMusicStorage();
+    if (storage == nullptr || !storage->IsReady()) {
+        return false;
+    }
+    // Probe the path without retaining a file handle; the playback task owns it.
+    std::FILE* probe = storage->OpenRead(path);
+    if (probe == nullptr)
+        return false;
+    std::fclose(probe);
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        if (music_playing_.load())
+            return false;
+        music_playing_.store(true);
+        stop_music_playback_.store(false);
+        music_paused_.store(false);
+        music_skip_request_.store(0);
+        music_progress_ms_.store(0);
+        music_total_ms_.store(0);
+        current_music_url_.clear();
+        current_music_file_path_ = path;
+        current_music_cache_key_ = cache_key;
+        local_music_playlist_ = std::move(playlist);
+        local_music_index_ = playlist_index;
+    }
+    Schedule([this, path, cache_key, title, artist]() mutable {
+        StartMusicPlayback({}, std::move(path), std::move(cache_key), std::move(title),
+                           std::move(artist), {}, {});
+    });
+    return true;
+}
+
+void Application::StartMusicPlayback(std::string url, std::string file_path, std::string cache_key,
+                                     std::string title, std::string artist, std::string lyric,
+                                     std::string lyric_url) {
     if (stop_music_playback_.load()) {
         music_playing_.store(false);
         current_music_url_.clear();
+        current_music_file_path_.clear();
+        current_music_cache_key_.clear();
+        local_music_playlist_.clear();
         return;
     }
 
@@ -1538,6 +1643,9 @@ void Application::StartMusicPlayback(std::string url, std::string title, std::st
         ESP_LOGW(TAG, "Cannot start music from device state %d", GetDeviceState());
         music_playing_.store(false);
         current_music_url_.clear();
+        current_music_file_path_.clear();
+        current_music_cache_key_.clear();
+        local_music_playlist_.clear();
         return;
     }
 
@@ -1554,11 +1662,14 @@ void Application::StartMusicPlayback(std::string url, std::string title, std::st
     auto* display = Board::GetInstance().GetDisplay();
     display->SwitchToMusicPage();
     display->SetMusicInfo(title.c_str(), artist.c_str());
-    display->SetMusicLyric(lyric.empty() ? "正在加载音乐..." : lyric.c_str());
+    display->SetMusicLyric(
+        lyric.empty() ? (lyric_url.empty() ? "本地音乐播放中" : "正在加载歌词...") : lyric.c_str());
     display->SetMusicProgress(0, 0);
 
     auto* args = new MusicPlaybackTaskArgs{this,
                                            std::move(url),
+                                           std::move(file_path),
+                                           std::move(cache_key),
                                            std::move(title),
                                            std::move(artist),
                                            std::move(lyric),
@@ -1567,7 +1678,8 @@ void Application::StartMusicPlayback(std::string url, std::string title, std::st
         [](void* context) {
             std::unique_ptr<MusicPlaybackTaskArgs> args(
                 static_cast<MusicPlaybackTaskArgs*>(context));
-            args->app->MusicPlaybackTask(std::move(args->url), std::move(args->title),
+            args->app->MusicPlaybackTask(std::move(args->url), std::move(args->file_path),
+                                         std::move(args->cache_key), std::move(args->title),
                                          std::move(args->artist), std::move(args->lyric),
                                          std::move(args->lyric_url));
             vTaskDelete(nullptr);
@@ -1577,21 +1689,28 @@ void Application::StartMusicPlayback(std::string url, std::string title, std::st
         delete args;
         music_playback_task_handle_ = nullptr;
         music_playing_.store(false);
+        music_paused_.store(false);
+        music_skip_request_.store(0);
         current_music_url_.clear();
+        current_music_file_path_.clear();
+        current_music_cache_key_.clear();
+        local_music_playlist_.clear();
         audio_service_.SetExternalPlaybackActive(false);
         Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         display->SetMusicLyric("播放失败：无法创建播放任务");
     }
 }
 
-void Application::MusicPlaybackTask(std::string url, std::string title, std::string artist,
-                                    std::string lyric, std::string lyric_url) {
-    constexpr int kReadBufferSize = 2048;
+void Application::MusicPlaybackTask(std::string url, std::string file_path, std::string cache_key,
+                                    std::string title, std::string artist, std::string lyric,
+                                    std::string lyric_url) {
+    constexpr int kReadBufferSize = 4096;
     constexpr size_t kMaxLyricBytes = kMaxMusicLyricBytes;
     auto& board = Board::GetInstance();
     auto* codec = board.GetAudioCodec();
     auto* display = board.GetDisplay();
     auto* network = board.GetNetwork();
+    auto* storage = board.GetMusicStorage();
     std::vector<MusicLyricLine> lyrics;
 
     if (lyric.empty() && !lyric_url.empty()) {
@@ -1638,29 +1757,52 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     int stream_sample_rate = codec->output_sample_rate();
     int stream_channels = codec->output_channels();
     size_t total_output_samples = 0;
+    std::vector<int16_t> converted_pcm;
     uint32_t total_duration_ms =
         lyrics.empty() ? 0 : std::max<uint32_t>(lyrics.back().time_ms + 5000, 1);
     size_t current_lyric_index = 0;
     size_t displayed_lyric_index = std::numeric_limits<size_t>::max();
     uint32_t last_ui_progress_ms = 0;
-    auto http = network->CreateHttp(3);
+    std::unique_ptr<Http> http;
+    std::FILE* local_file = nullptr;
+    std::FILE* cache_file = nullptr;
+    std::string cache_temp_path;
+    size_t body_length = 0;
+    size_t bytes_read = 0;
 
     do {
-        if (!http) {
-            playback_failed = true;
-            break;
+        if (!file_path.empty()) {
+            if (storage == nullptr || (local_file = storage->OpenRead(file_path)) == nullptr) {
+                playback_failed = true;
+                break;
+            }
+            if (std::fseek(local_file, 0, SEEK_END) == 0) {
+                const long file_size = std::ftell(local_file);
+                if (file_size > 0)
+                    body_length = static_cast<size_t>(file_size);
+                std::rewind(local_file);
+            }
+        } else {
+            http = network == nullptr ? nullptr : network->CreateHttp(3);
+            if (!http) {
+                playback_failed = true;
+                break;
+            }
+            http->SetTimeout(5000);
+            http->SetHeader("Accept", "audio/mpeg, audio/mp3, application/octet-stream");
+            http->SetHeader("Accept-Encoding", "identity");
+            auto opened = http->Open("GET", url);
+            auto status = opened ? http->GetStatusCode()
+                                 : NetworkResult<int>(std::unexpected(opened.error()));
+            if (!opened || !status || *status < 200 || *status >= 300) {
+                playback_failed = true;
+                break;
+            }
+            body_length = http->GetBodyLength();
+            if (storage != nullptr && !cache_key.empty()) {
+                cache_file = storage->OpenCacheWrite(cache_key, body_length, cache_temp_path);
+            }
         }
-        http->SetTimeout(2000);
-        http->SetHeader("Accept", "audio/mpeg, audio/mp3, application/octet-stream");
-        http->SetHeader("Accept-Encoding", "identity");
-        auto opened = http->Open("GET", url);
-        auto status = opened ? http->GetStatusCode()
-                             : NetworkResult<int>(std::unexpected(opened.error()));
-        if (!opened || !status || *status < 200 || *status >= 300) {
-            playback_failed = true;
-            break;
-        }
-        const size_t body_length = http->GetBodyLength();
 
         if (esp_audio_dec_register_default() != ESP_AUDIO_ERR_OK) {
             playback_failed = true;
@@ -1693,31 +1835,73 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
         }
 
         int empty_reads = 0;
+        size_t buffered_bytes = 0;
         while (!stop_music_playback_.load()) {
-            auto read = http->Read(reinterpret_cast<char*>(input_buffer), kReadBufferSize);
-            if (!read) {
+            if (music_paused_.load()) {
+                vTaskDelay(pdMS_TO_TICKS(25));
+                continue;
+            }
+            const int read_capacity = kReadBufferSize - static_cast<int>(buffered_bytes);
+            if (read_capacity <= 0) {
                 playback_failed = true;
                 break;
             }
-            const int read_size = *read;
-            if (read_size == 0) {
-                if (++empty_reads >= 3) {
-                    playback_finished = true;
+            int read_size = 0;
+            if (local_file != nullptr) {
+                read_size = static_cast<int>(
+                    std::fread(input_buffer + buffered_bytes, 1, read_capacity, local_file));
+                if (read_size == 0) {
+                    if (std::ferror(local_file) != 0)
+                        playback_failed = true;
+                    else
+                        playback_finished = true;
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(50));
-                continue;
+            } else {
+                auto read = http->Read(reinterpret_cast<char*>(input_buffer + buffered_bytes),
+                                       read_capacity);
+                if (!read) {
+                    playback_failed = true;
+                    break;
+                }
+                read_size = *read;
+                if (read_size == 0) {
+                    if (++empty_reads >= 3) {
+                        playback_finished = body_length == 0 || bytes_read >= body_length;
+                        playback_failed = !playback_finished;
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    continue;
+                }
             }
             empty_reads = 0;
+            if (read_size < 0 || read_size > read_capacity) {
+                playback_failed = true;
+                break;
+            }
+            if (cache_file != nullptr) {
+                const size_t incoming_bytes = static_cast<size_t>(read_size);
+                if (incoming_bytes > kMaxMusicCacheBytes - bytes_read ||
+                    std::fwrite(input_buffer + buffered_bytes, 1, incoming_bytes, cache_file) !=
+                        incoming_bytes) {
+                    std::fclose(cache_file);
+                    cache_file = nullptr;
+                    storage->DiscardCache(cache_temp_path);
+                    cache_temp_path.clear();
+                }
+            }
+            bytes_read += static_cast<size_t>(read_size);
             esp_audio_simple_dec_raw_t raw = {
                 .buffer = input_buffer,
-                .len = static_cast<uint32_t>(read_size),
+                .len = static_cast<uint32_t>(buffered_bytes + read_size),
                 .eos = false,
                 .consumed = 0,
                 .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
             };
 
-            while (raw.len > 0 && !stop_music_playback_.load()) {
+            buffered_bytes = 0;
+            while (raw.len > 0 && !stop_music_playback_.load() && !music_paused_.load()) {
                 esp_audio_simple_dec_out_t output = {
                     .buffer = output_buffer,
                     .len = static_cast<uint32_t>(output_buffer_size),
@@ -1754,23 +1938,26 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                         }
                     }
 
-                    std::vector<int16_t> pcm(output.decoded_size / sizeof(int16_t));
+                    std::vector<int16_t> pcm = audio_service_.AcquirePlaybackPcmBuffer(
+                        output.decoded_size / sizeof(int16_t));
+                    pcm.resize(output.decoded_size / sizeof(int16_t));
                     std::memcpy(pcm.data(), output.buffer, output.decoded_size);
                     if (stream_channels == 2 && codec->output_channels() == 1) {
-                        std::vector<int16_t> mono(pcm.size() / 2);
-                        for (size_t index = 0; index < mono.size(); ++index) {
+                        const size_t mono_samples = pcm.size() / 2;
+                        for (size_t index = 0; index < mono_samples; ++index) {
                             const size_t source = index * 2;
-                            mono[index] = static_cast<int16_t>(
+                            pcm[index] = static_cast<int16_t>(
                                 (static_cast<int32_t>(pcm[source]) + pcm[source + 1]) / 2);
                         }
-                        pcm = std::move(mono);
+                        pcm.resize(mono_samples);
                     } else if (stream_channels == 1 && codec->output_channels() == 2) {
-                        std::vector<int16_t> stereo(pcm.size() * 2);
-                        for (size_t index = 0; index < pcm.size(); ++index) {
-                            stereo[index * 2] = pcm[index];
-                            stereo[index * 2 + 1] = pcm[index];
+                        const size_t mono_samples = pcm.size();
+                        pcm.resize(mono_samples * 2);
+                        for (size_t index = mono_samples; index > 0; --index) {
+                            const int16_t sample = pcm[index - 1];
+                            pcm[(index - 1) * 2] = sample;
+                            pcm[(index - 1) * 2 + 1] = sample;
                         }
-                        pcm = std::move(stereo);
                     }
 
                     if (stream_sample_rate != codec->output_sample_rate()) {
@@ -1794,15 +1981,14 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                         uint32_t max_output_samples = 0;
                         esp_ae_rate_cvt_get_max_out_sample_num(resampler, input_samples,
                                                                &max_output_samples);
-                        std::vector<int16_t> converted(max_output_samples *
-                                                       codec->output_channels());
+                        converted_pcm.resize(max_output_samples * codec->output_channels());
                         uint32_t actual_output_samples = max_output_samples;
                         esp_ae_rate_cvt_process(
                             resampler, reinterpret_cast<esp_ae_sample_t>(pcm.data()), input_samples,
-                            reinterpret_cast<esp_ae_sample_t>(converted.data()),
+                            reinterpret_cast<esp_ae_sample_t>(converted_pcm.data()),
                             &actual_output_samples);
-                        converted.resize(actual_output_samples * codec->output_channels());
-                        pcm = std::move(converted);
+                        converted_pcm.resize(actual_output_samples * codec->output_channels());
+                        pcm.swap(converted_pcm);
                     }
 
                     if (!pcm.empty() && !stop_music_playback_.load()) {
@@ -1843,6 +2029,8 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                 }
 
                 if (consumed == 0) {
+                    buffered_bytes = raw.len;
+                    std::memmove(input_buffer, raw.buffer, buffered_bytes);
                     break;
                 }
                 raw.len -= std::min(raw.len, consumed);
@@ -1851,11 +2039,18 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
             if (playback_failed) {
                 break;
             }
+            if (music_paused_.load()) {
+                buffered_bytes = raw.len;
+                std::memmove(input_buffer, raw.buffer, buffered_bytes);
+            }
         }
     } while (false);
 
     if (http) {
         http->Close();
+    }
+    if (local_file != nullptr) {
+        std::fclose(local_file);
     }
     if (resampler != nullptr) {
         esp_ae_rate_cvt_close(resampler);
@@ -1871,6 +2066,20 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     if (decoder_registered) {
         esp_audio_dec_unregister_default();
     }
+    if (cache_file != nullptr) {
+        const bool stream_complete = playback_finished && !playback_failed &&
+                                     !stop_music_playback_.load() && total_output_samples > 0 &&
+                                     (body_length == 0 || bytes_read >= body_length);
+        const bool flushed = std::fflush(cache_file) == 0;
+        const bool closed = std::fclose(cache_file) == 0;
+        cache_file = nullptr;
+        if (stream_complete && flushed && closed && storage != nullptr &&
+            storage->CommitCache(cache_temp_path, cache_key)) {
+            ESP_LOGI(TAG, "Cached complete music stream");
+        } else if (storage != nullptr) {
+            storage->DiscardCache(cache_temp_path);
+        }
+    }
     while (playback_finished && !playback_failed && !stop_music_playback_.load() &&
            !audio_service_.IsPlaybackIdle()) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1879,12 +2088,75 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
     const bool stopped = stop_music_playback_.load();
+    std::vector<MusicFile> playlist;
+    size_t next_index = 0;
+    bool start_next = false;
+    bool start_pending_online = false;
+    std::string pending_url;
+    std::string pending_title;
+    std::string pending_artist;
+    std::string pending_lyric_url;
+    std::string pending_cache_key;
     {
         std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        const int skip_request = music_skip_request_.exchange(0);
+        if (stopped && skip_request == 2 && !pending_music_url_.empty()) {
+            pending_url = std::move(pending_music_url_);
+            pending_title = std::move(pending_music_title_);
+            pending_artist = std::move(pending_music_artist_);
+            pending_lyric_url = std::move(pending_music_lyric_url_);
+            pending_cache_key = std::move(pending_music_cache_key_);
+            start_pending_online = true;
+        }
+        pending_music_url_.clear();
+        pending_music_title_.clear();
+        pending_music_artist_.clear();
+        pending_music_lyric_url_.clear();
+        pending_music_cache_key_.clear();
+        if (!local_music_playlist_.empty() && !start_pending_online &&
+            ((stopped && skip_request != 0) || (playback_finished && !playback_failed))) {
+            if (skip_request != 0) {
+                const int count = static_cast<int>(local_music_playlist_.size());
+                int index = static_cast<int>(local_music_index_) + skip_request;
+                index = (index % count + count) % count;
+                local_music_index_ = static_cast<size_t>(index);
+            } else if (local_music_playlist_.size() > 1) {
+                local_music_index_ = (local_music_index_ + 1) % local_music_playlist_.size();
+            } else {
+                local_music_index_ = 0;
+            }
+            if (local_music_playlist_.size() > 1 || skip_request != 0) {
+                playlist = local_music_playlist_;
+                next_index = local_music_index_;
+                start_next = true;
+            }
+        }
         music_playing_.store(false);
         stop_music_playback_.store(false);
+        music_paused_.store(false);
         music_playback_task_handle_ = nullptr;
         current_music_url_.clear();
+        current_music_file_path_.clear();
+        current_music_cache_key_.clear();
+        if (!start_next)
+            local_music_playlist_.clear();
+    }
+    if (start_next) {
+        Schedule([this, playlist = std::move(playlist), next_index]() {
+            PlayLocalMusic(playlist, next_index);
+        });
+        return;
+    }
+    if (start_pending_online) {
+        Schedule([this, pending_url = std::move(pending_url),
+                  pending_title = std::move(pending_title),
+                  pending_artist = std::move(pending_artist),
+                  pending_lyric_url = std::move(pending_lyric_url),
+                  pending_cache_key = std::move(pending_cache_key)]() mutable {
+            PlayMusicFromUrl(pending_url, pending_title, pending_artist, "", pending_lyric_url,
+                             pending_cache_key);
+        });
+        return;
     }
     if (stopped) {
         return;
@@ -1904,6 +2176,48 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     });
 }
 
+void Application::PauseMusicPlayback() {
+    if (music_playing_.load()) {
+        music_paused_.store(true);
+        Schedule([]() { Board::GetInstance().GetDisplay()->SetMusicLyric("已暂停"); });
+    }
+}
+
+void Application::ResumeMusicPlayback() {
+    if (music_playing_.load()) {
+        music_paused_.store(false);
+        Schedule([]() { Board::GetInstance().GetDisplay()->SetMusicLyric("继续播放"); });
+    }
+}
+
+void Application::ToggleMusicPlayback() {
+    if (music_paused_.load()) {
+        ResumeMusicPlayback();
+    } else {
+        PauseMusicPlayback();
+    }
+}
+
+bool Application::NextMusicTrack() {
+    std::lock_guard<std::mutex> lock(music_playback_mutex_);
+    if (!music_playing_.load() || local_music_playlist_.empty())
+        return false;
+    music_skip_request_.store(1);
+    stop_music_playback_.store(true);
+    audio_service_.ResetDecoder();
+    return true;
+}
+
+bool Application::PreviousMusicTrack() {
+    std::lock_guard<std::mutex> lock(music_playback_mutex_);
+    if (!music_playing_.load() || local_music_playlist_.empty())
+        return false;
+    music_skip_request_.store(-1);
+    stop_music_playback_.store(true);
+    audio_service_.ResetDecoder();
+    return true;
+}
+
 void Application::UpdateMusicLyric(const std::string& lyric) {
     Schedule([lyric]() {
         auto* display = Board::GetInstance().GetDisplay();
@@ -1919,6 +2233,16 @@ void Application::StopMusicPlayback(bool return_to_weather) {
         return;
     }
     stop_music_playback_.store(true);
+    music_paused_.store(false);
+    music_skip_request_.store(0);
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        pending_music_url_.clear();
+        pending_music_title_.clear();
+        pending_music_artist_.clear();
+        pending_music_lyric_url_.clear();
+        pending_music_cache_key_.clear();
+    }
     audio_service_.ResetDecoder();
     if (return_to_weather) {
         Schedule([]() {

@@ -39,6 +39,10 @@ public:
     virtual void Start();
 
     inline bool duplex() const { return duplex_; }
+
+    // Most duplex codecs need the output clock to remain active while capturing audio.
+    // Boards with independent input and output codec paths may opt in to power down output.
+    virtual bool CanDisableOutputWhileInputActive() const { return false; }
     inline bool input_reference() const { return input_reference_; }
     inline int input_sample_rate() const { return input_sample_rate_; }
     inline int output_sample_rate() const { return output_sample_rate_; }

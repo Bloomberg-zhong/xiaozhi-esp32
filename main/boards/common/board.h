@@ -46,6 +46,7 @@ using NetworkEventCallback = std::function<void(NetworkEvent event, const std::s
 void* create_board();
 class AudioCodec;
 class Display;
+class MusicStorage;
 class Board {
 private:
     Board(const Board&) = delete; // 禁用拷贝构造函数
@@ -72,6 +73,7 @@ public:
     virtual AudioCodec* GetAudioCodec() = 0;
     virtual bool GetTemperature(float& esp32temp);
     virtual Display* GetDisplay();
+    virtual MusicStorage* GetMusicStorage() { return nullptr; }
     virtual Camera* GetCamera();
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
