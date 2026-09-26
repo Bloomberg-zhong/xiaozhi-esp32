@@ -6,6 +6,8 @@
 #include <memory>
 
 #include "application.h"
+#include "board.h"
+#include "local_music.h"
 #include "mcp_server.h"
 #include "music_player.h"
 #include "music_source.h"
@@ -39,6 +41,9 @@ cJSON* MakeTrackJson(const MusicTrack& track) {
 
 void LoadMusicSettings(MusicPlayer& player) {
     player.SetSource(CreateMusicSource(MusicSourceConfig::Load()));
+    if (const char* local_path = Board::GetInstance().GetLocalMusicPath()) {
+        player.SetLocalRoot(local_path);
+    }
     Settings settings(kSettingsNamespace, false);
     MusicPlayMode mode;
     if (ParseMusicPlayMode(settings.GetString("mode", "sequence"), mode)) {
@@ -83,6 +88,41 @@ void AddMusicTools(McpServer& server) {
         });
     play->set_async(true);
     server.AddTool(std::move(play));
+
+    auto play_local = std::make_unique<McpTool>(
+        "self.music.play_local",
+        "Play music stored on the device's SD card (for example children's songs). Use it when "
+        "the user asks for local, offline or SD card music, or when no online music source is "
+        "configured.\n"
+        "Args:\n"
+        "  `query`: Keywords matched against file names, folders, titles and artists, e.g. "
+        "\"儿歌\". Empty plays everything.\n"
+        "Return:\n"
+        "  The first song and the number of songs found.",
+        PropertyList({Property("query", kPropertyTypeString, std::string(""))}),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            auto& player = app.GetMusicPlayer();
+            const std::string root = player.GetLocalRoot();
+            if (root.empty()) {
+                return MakeResult(false, "No SD card with music is available");
+            }
+            LocalMusicScanOptions options;
+            options.excluded_folders.push_back(kWhiteNoiseFolder);
+            auto tracks = FilterLocalMusic(ScanLocalMusic(root, options),
+                                           properties["query"].value<std::string>());
+            if (tracks.empty()) {
+                return MakeResult(false, "No matching music files on the SD card");
+            }
+            cJSON* result = MakeResult(true, "");
+            cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(tracks.front()));
+            cJSON_AddNumberToObject(result, "queue_length", tracks.size());
+            player.SetQueue(std::move(tracks), 0, false, "local");
+            app.PlayMusic(true);
+            return result;
+        });
+    play_local->set_async(true);
+    server.AddTool(std::move(play_local));
 
     server.AddTool(
         "self.music.control",

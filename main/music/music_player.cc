@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -18,6 +19,7 @@
 #include "esp_audio_dec_default.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
+#include "local_music.h"
 #include "music_util.h"
 
 #define TAG "MusicPlayer"
@@ -39,6 +41,7 @@ constexpr int kMaxRedirects = 3;
 constexpr int kMaxStreamRetries = 3;
 constexpr int kMaxDecodeErrors = 8;
 constexpr int kOutputFrameMs = 60;
+constexpr size_t kMaxLocalLyricBytes = 64 * 1024;
 
 #ifdef CONFIG_MUSIC_PLAYER_STREAM_BUFFER_KB
 constexpr size_t kStreamBufferSize = CONFIG_MUSIC_PLAYER_STREAM_BUFFER_KB * 1024;
@@ -149,10 +152,28 @@ std::shared_ptr<MusicSource> MusicPlayer::GetSource() const {
     return source_;
 }
 
-void MusicPlayer::SetQueue(std::vector<MusicTrack> tracks, size_t start_index) {
+void MusicPlayer::SetQueue(std::vector<MusicTrack> tracks, size_t start_index, bool loop,
+                           std::string tag) {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_ = std::move(tracks);
     index_ = start_index < queue_.size() ? start_index : 0;
+    loop_queue_ = loop;
+    queue_tag_ = std::move(tag);
+}
+
+std::string MusicPlayer::queue_tag() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_tag_;
+}
+
+void MusicPlayer::SetLocalRoot(std::string root) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    local_root_ = std::move(root);
+}
+
+std::string MusicPlayer::GetLocalRoot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return local_root_;
 }
 
 bool MusicPlayer::HasTrack() const {
@@ -175,7 +196,7 @@ bool MusicPlayer::MoveNext(bool automatic) {
     if (size == 0) {
         return false;
     }
-    switch (play_mode_) {
+    switch (loop_queue_ ? MusicPlayMode::kRepeatAll : play_mode_) {
         case MusicPlayMode::kRepeatOne:
             if (automatic) {
                 return true;
@@ -375,6 +396,9 @@ cJSON* MusicPlayer::GetStatusJson() const {
     cJSON_AddStringToObject(root, "state", state);
     cJSON_AddStringToObject(root, "play_mode", MusicPlayModeName(play_mode_));
     cJSON_AddNumberToObject(root, "queue_length", queue_.size());
+    if (!queue_tag_.empty()) {
+        cJSON_AddStringToObject(root, "queue", queue_tag_.c_str());
+    }
     cJSON_AddBoolToObject(root, "source_configured", source_ != nullptr);
     if (!queue_.empty()) {
         const MusicTrack& track = queue_[index_];
@@ -521,10 +545,21 @@ bool MusicPlayer::WriteToBuffer(Session& session, const char* data, size_t size)
 }
 
 void MusicPlayer::LoadLyrics(const std::shared_ptr<Session>& session) {
-    if (!session->source) {
+    std::vector<LyricLine> lines;
+    const MusicTrack& track = session->track;
+    if (IsLocalMusicPath(track.lyric_url)) {
+        std::string text;
+        if (ReadLocalTextFile(track.lyric_url, kMaxLocalLyricBytes, text)) {
+            lines = ParseLrc(text);
+        }
+    } else if (!track.lyric_text.empty()) {
+        lines = ParseLrc(track.lyric_text);
+    } else if (session->source && !IsLocalMusicPath(track.stream_url)) {
+        lines = session->source->FetchLyrics(track);
+    }
+    if (lines.empty()) {
         return;
     }
-    auto lines = session->source->FetchLyrics(session->track);
     ESP_LOGI(TAG, "Loaded %u lyric lines", static_cast<unsigned>(lines.size()));
     std::lock_guard<std::mutex> lock(mutex_);
     if (session_ == session) {
@@ -533,7 +568,44 @@ void MusicPlayer::LoadLyrics(const std::shared_ptr<Session>& session) {
     }
 }
 
+void MusicPlayer::ReadLocalFile(const std::shared_ptr<Session>& session) {
+    FILE* file = std::fopen(session->track.stream_url.c_str(), "rb");
+    if (file == nullptr) {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        session->error = "cannot open the music file";
+        session->net_failed = true;
+        return;
+    }
+    std::vector<char> chunk(kNetChunkSize);
+    bool failed = false;
+    while (!session->cancelled) {
+        size_t size = std::fread(chunk.data(), 1, chunk.size(), file);
+        if (size == 0) {
+            failed = std::ferror(file) != 0;
+            break;
+        }
+        if (!WriteToBuffer(*session, chunk.data(), size)) {
+            break;
+        }
+    }
+    std::fclose(file);
+    if (failed) {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        session->error = "cannot read the music file";
+        session->net_failed = true;
+        return;
+    }
+    if (!session->cancelled) {
+        LoadLyrics(session);
+    }
+    session->net_done = true;
+}
+
 void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
+    if (IsLocalMusicPath(session->track.stream_url)) {
+        ReadLocalFile(session);
+        return;
+    }
     std::vector<char> chunk(kNetChunkSize);
     size_t received = 0;
     size_t total = 0;

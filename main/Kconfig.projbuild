@@ -1076,6 +1076,15 @@ menu "Music Player"
         depends on MUSIC_SOURCE_DEFAULT_HTTP_API
 endmenu
 
+config USE_POMODORO
+    bool "Enable pomodoro timer"
+    default n
+    help
+        Adds the self.pomodoro.* MCP tools: a focus/break countdown shown in
+        the status bar, with an alert sound at the end. With the music player
+        and a board providing local music storage, audio files in the
+        "white-noise" folder play during the focus time.
+
 menu "Camera Configuration"
     depends on !IDF_TARGET_ESP32
 

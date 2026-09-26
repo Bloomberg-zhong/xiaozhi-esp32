@@ -6,6 +6,13 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdlib>
+#include <fstream>
+
+#include "local_music.h"
 #include "lrc_parser.h"
 #include "music_util.h"
 
@@ -162,6 +169,72 @@ void TestDownmix() {
     EXPECT(out.empty());
 }
 
+void WriteFile(const std::string& path, const std::string& content) {
+    std::ofstream(path, std::ios::binary) << content;
+}
+
+void TestLocalMusic() {
+    char root_template[] = "/tmp/xiaozhi_music_XXXXXX";
+    const char* root_ptr = mkdtemp(root_template);
+    EXPECT(root_ptr != nullptr);
+    if (root_ptr == nullptr) {
+        return;
+    }
+    const std::string root = root_ptr;
+    mkdir((root + "/儿童音乐").c_str(), 0755);
+    mkdir((root + "/儿童音乐/deep").c_str(), 0755);
+    mkdir((root + "/White-Noise").c_str(), 0755);
+    mkdir((root + "/.hidden").c_str(), 0755);
+    WriteFile(root + "/儿童音乐/小星星.mp3", "x");
+    WriteFile(root + "/儿童音乐/小星星.lrc", "[00:01.00]一闪一闪");
+    WriteFile(root + "/儿童音乐/deep/Beyond - 海阔天空.FLAC", "x");
+    WriteFile(root + "/儿童音乐/notes.txt", "x");
+    WriteFile(root + "/White-Noise/rain.mp3", "x");
+    WriteFile(root + "/.hidden/secret.mp3", "x");
+    WriteFile(root + "/a.wav", "x");
+
+    auto all = ScanLocalMusic(root + "/");
+    EXPECT(all.size() == 4);  // Includes white noise, skips hidden and non-audio files
+    if (all.size() == 4) {
+        EXPECT(all[0].stream_url == root + "/a.wav");  // Files before sub folders
+        EXPECT(all[0].album == root.substr(root.rfind('/') + 1));
+    }
+
+    LocalMusicScanOptions options;
+    options.excluded_folders.push_back(kWhiteNoiseFolder);
+    auto music = ScanLocalMusic(root, options);
+    EXPECT(music.size() == 3);
+    if (music.size() == 3) {
+        EXPECT(music[1].title == "小星星" && music[1].artist.empty());
+        EXPECT(music[1].album == "儿童音乐");
+        EXPECT(music[1].lyric_url == root + "/儿童音乐/小星星.lrc");
+        EXPECT(music[2].title == "海阔天空" && music[2].artist == "Beyond");
+        EXPECT(music[2].album == "deep" && music[2].lyric_url.empty());
+        EXPECT(IsLocalMusicPath(music[2].stream_url));
+    }
+
+    options.max_depth = 0;
+    EXPECT(ScanLocalMusic(root, options).size() == 1);
+    options.max_depth = 4;
+    options.max_tracks = 2;
+    EXPECT(ScanLocalMusic(root, options).size() == 2);
+
+    EXPECT(FilterLocalMusic(music, "").size() == 3);
+    EXPECT(FilterLocalMusic(music, "儿童音乐").size() == 2);
+    EXPECT(FilterLocalMusic(music, "beyond 海阔").size() == 1);
+    EXPECT(FilterLocalMusic(music, "beyond 小星星").empty());
+    EXPECT(ScanLocalMusic(root + "/missing").empty());
+    EXPECT(!IsLocalMusicPath("http://h/a.mp3"));
+
+    std::string text;
+    EXPECT(ReadLocalTextFile(root + "/儿童音乐/小星星.lrc", 1024, text));
+    EXPECT(text == "[00:01.00]一闪一闪");
+    EXPECT(!ReadLocalTextFile(root + "/儿童音乐/小星星.lrc", 4, text));
+    EXPECT(!ReadLocalTextFile(root + "/missing.lrc", 1024, text));
+
+    std::system(("rm -rf '" + root + "'").c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -170,6 +243,7 @@ int main() {
     TestFormatDetection();
     TestUrls();
     TestDownmix();
+    TestLocalMusic();
     if (failures != 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

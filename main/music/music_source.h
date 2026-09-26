@@ -42,7 +42,7 @@ public:
 
     // Adds source-specific headers (such as authorization) to requests for
     // URLs produced by this source.
-    virtual void ApplyHeaders(const std::string& url, Http& http) const {}
+    virtual void ApplyHeaders(const std::string& /*url*/, Http& /*http*/) const {}
 };
 
 // Connection ids for modem-based networks. Wi-Fi ignores them.

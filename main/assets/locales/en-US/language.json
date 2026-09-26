@@ -54,6 +54,13 @@
         "FOUND_NEW_ASSETS": "Found new assets: %s",
         "DOWNLOAD_ASSETS_FAILED": "Failed to download assets",
         "LOADING_ASSETS": "Loading assets...",
-        "HELLO_MY_FRIEND": "Hello, my friend!"
+        "HELLO_MY_FRIEND": "Hello, my friend!",
+        "POMODORO_FOCUS": "Focus",
+        "POMODORO_BREAK": "Break",
+        "POMODORO_PAUSED": "Paused",
+        "POMODORO_MINUTES_LEFT": " min left",
+        "POMODORO_FOCUS_DONE": "Focus finished, time for a break",
+        "POMODORO_BREAK_DONE": "Break is over",
+        "POMODORO_DONE": "Pomodoro finished"
     }
 }

@@ -24,6 +24,13 @@
 #define AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
 
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define USER_BUTTON_GPIO        GPIO_NUM_18  // KEY button on the right side of the screen
+
+// TF card slot, SDMMC 1-bit mode
+#define SD_CARD_CLK_PIN      GPIO_NUM_38
+#define SD_CARD_CMD_PIN      GPIO_NUM_21
+#define SD_CARD_D0_PIN       GPIO_NUM_39
+#define SD_CARD_MOUNT_POINT  "/sdcard"
 
 
 #define RLCD_DC_PIN    GPIO_NUM_5  

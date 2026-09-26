@@ -54,6 +54,13 @@
         "CONNECTION_SUCCESSFUL": "連線成功",
         "FLIGHT_MODE_OFF": "飛航模式已關閉",
         "FLIGHT_MODE_ON": "飛航模式已開啟",
-        "MODEM_INIT_ERROR": "模組初始化失敗"
+        "MODEM_INIT_ERROR": "模組初始化失敗",
+        "POMODORO_FOCUS": "專注",
+        "POMODORO_BREAK": "休息",
+        "POMODORO_PAUSED": "已暫停",
+        "POMODORO_MINUTES_LEFT": " 分鐘",
+        "POMODORO_FOCUS_DONE": "專注結束，休息一下吧",
+        "POMODORO_BREAK_DONE": "休息結束",
+        "POMODORO_DONE": "番茄鐘完成"
     }
 }

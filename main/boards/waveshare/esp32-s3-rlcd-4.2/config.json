@@ -10,7 +10,10 @@
                 "CONFIG_USE_DEVICE_AEC=y",
                 "CONFIG_USE_MUSIC_PLAYER=y",
                 "CONFIG_PM_ENABLE=y",
-                "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y"
+                "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
+                "CONFIG_USE_POMODORO=y",
+                "CONFIG_FATFS_LFN_HEAP=y",
+                "CONFIG_FATFS_API_ENCODING_UTF_8=y"
             ]
         }
     ]

@@ -73,6 +73,8 @@ public:
     virtual bool GetTemperature(float& esp32temp);
     virtual Display* GetDisplay();
     virtual Camera* GetCamera();
+    // Mount point of local music storage such as an SD card, or nullptr.
+    virtual const char* GetLocalMusicPath() { return nullptr; }
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }

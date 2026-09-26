@@ -36,6 +36,7 @@ class MusicPlayerLogicTests(unittest.TestCase):
                     str(CPP_TEST),
                     str(MUSIC_DIR / "lrc_parser.cc"),
                     str(MUSIC_DIR / "music_util.cc"),
+                    str(MUSIC_DIR / "local_music.cc"),
                     "-o",
                     str(executable),
                 ],

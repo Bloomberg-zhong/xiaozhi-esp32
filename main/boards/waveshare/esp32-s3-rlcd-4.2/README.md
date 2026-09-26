@@ -53,6 +53,13 @@ idf.py build flash monitor
 音乐来自你自己的 Navidrome/Subsonic 服务器或本地音乐文件夹，配置方法见
 [docs/music-player.md](../../../../docs/music-player.md)。
 
+TF 卡（SDMMC 1 线：CLK=GPIO38，CMD=GPIO21，D0=GPIO39，FAT32，不会自动格式化）挂载到 `/sdcard`：
+
+- 放在卡上的音乐可以说“播放卡里的儿歌”来播放（`self.music.play_local`）。
+- `white-noise/` 目录放白噪音，说“开始番茄钟”时在专注期间循环播放。
+
+KEY 键（GPIO18）：单击暂停/继续，双击下一首，长按停止番茄钟和音乐。
+
 # 省电
 
 - 空闲 3 分钟（没有对话、没有播放音乐）后自动进入省电模式：停止唤醒词和麦克风，CPU 进入

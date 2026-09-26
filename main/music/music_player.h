@@ -55,7 +55,11 @@ public:
     void SetSource(std::shared_ptr<MusicSource> source);
     std::shared_ptr<MusicSource> GetSource() const;
 
-    void SetQueue(std::vector<MusicTrack> tracks, size_t start_index);
+    // `loop` repeats the whole queue regardless of the play mode; `tag` lets
+    // other features (such as the pomodoro white noise) recognize their queue.
+    void SetQueue(std::vector<MusicTrack> tracks, size_t start_index, bool loop = false,
+                  std::string tag = "");
+    std::string queue_tag() const;
     bool HasTrack() const;
     bool GetCurrentTrack(MusicTrack& track) const;
     // Selects the next track. `automatic` means the current track ended by
@@ -64,6 +68,10 @@ public:
     bool MovePrevious();
     void SetPlayMode(MusicPlayMode mode);
     MusicPlayMode GetPlayMode() const;
+
+    // Mounted folder with local music (for example "/sdcard"), or empty.
+    void SetLocalRoot(std::string root);
+    std::string GetLocalRoot() const;
 
     // Whether the user wants music to be heard once the device is free.
     void SetWantsPlayback(bool wants) { wants_playback_ = wants; }
@@ -95,6 +103,9 @@ private:
     std::vector<MusicTrack> queue_;
     size_t index_ = 0;
     MusicPlayMode play_mode_ = MusicPlayMode::kSequence;
+    bool loop_queue_ = false;
+    std::string queue_tag_;
+    std::string local_root_;
     std::shared_ptr<Session> session_;
     std::vector<LyricLine> lyrics_;
     int lyric_index_ = -1;
@@ -108,6 +119,7 @@ private:
     bool StartTasks(const std::shared_ptr<Session>& session);
     static void TaskEntry(void* arg);
     void NetTask(const std::shared_ptr<Session>& session);
+    void ReadLocalFile(const std::shared_ptr<Session>& session);
     void DecodeTask(const std::shared_ptr<Session>& session);
     std::unique_ptr<Http> OpenStream(Session& session, size_t offset, size_t& total_bytes);
     bool WriteToBuffer(Session& session, const char* data, size_t size);

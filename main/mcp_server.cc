@@ -21,6 +21,9 @@
 #if CONFIG_USE_MUSIC_PLAYER
 #include "music/music_tools.h"
 #endif
+#if CONFIG_USE_POMODORO
+#include "pomodoro/pomodoro.h"
+#endif
 
 #define TAG "MCP"
 
@@ -121,6 +124,9 @@ void McpServer::AddCommonTools() {
 
 #if CONFIG_USE_MUSIC_PLAYER
     AddMusicTools(*this);
+#endif
+#if CONFIG_USE_POMODORO
+    Pomodoro::AddTools(*this);
 #endif
 
     // Restore the original tools list to the end of the tools list

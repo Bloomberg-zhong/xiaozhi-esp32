@@ -49,6 +49,7 @@ self.music.get_source()
 
 | 工具 | 作用 |
 |---|---|
+| `self.music.play_local(query)` | 播放板载存储（TF 卡）里的音乐，按文件名/目录/歌名/歌手过滤，`query` 为空播放全部；不包括 `white-noise` 目录。 |
 | `self.music.play(query)` | 搜索并播放，结果作为播放队列（最多 20 首）；`query` 为空时随机播放。在后台任务中执行，不阻塞主循环。 |
 | `self.music.control(action)` | `pause` / `resume` / `next` / `previous` / `stop` |
 | `self.music.set_play_mode(mode)` | `sequence`（播完停止）/ `repeat_all` / `repeat_one` / `shuffle`，保存到 NVS |
@@ -69,6 +70,33 @@ self.music.get_source()
 - 网络中断时自动重连 3 次；一首歌失败会跳到下一首，连续 3 首失败后停止并提示错误。
 - 支持的格式：MP3、AAC（ADTS）、M4A、FLAC、WAV。统一下混为单声道并重采样到编解码器
   输出采样率。建议让服务器转码为 MP3 以节省带宽和 CPU。
+
+## 本地音乐（TF 卡）
+
+板子实现 `Board::GetLocalMusicPath()` 返回挂载点时（RLCD-4.2 为 `/sdcard`），播放器可以直接播放卡上的
+`.mp3 .m4a .aac .flac .wav` 文件：递归扫描最多 4 层、500 首，跳过隐藏文件；`歌手 - 歌名.mp3`
+会解析出歌手，所在目录作为专辑，同名 `.lrc` 作为歌词。卡需为 FAT32，中文文件名需要
+`CONFIG_FATFS_LFN_HEAP` 和 `CONFIG_FATFS_API_ENCODING_UTF_8`（RLCD-4.2 已开启）。
+
+## 番茄钟 / Pomodoro
+
+`CONFIG_USE_POMODORO` 开启后提供：
+
+| 工具 | 作用 |
+|---|---|
+| `self.pomodoro.start(focus_min=25, break_min=5, white_noise=true)` | 开始专注倒计时，结束后自动进入休息倒计时（`break_min=0` 不休息）。重复调用会重新开始。 |
+| `self.pomodoro.pause()` | 暂停 / 继续 |
+| `self.pomodoro.stop()` | 停止，同时停止白噪音 |
+| `self.pomodoro.status()` | 阶段、是否暂停、剩余秒数 |
+
+- 剩余时间按截止时刻计算，不会漂移；暂停时冻结剩余时长。
+- 空闲或播放时状态栏显示“专注 24 分钟”这类文字，每 5 秒刷新；对话中不覆盖状态栏。
+- 阶段结束时会先唤醒省电模式，再提示音 + 屏幕提示；对话中只显示通知，不打断说话。
+- 白噪音：`<本地音乐根目录>/white-noise/` 下的音频随机选一首开始，整个目录循环播放。它走的就是音乐
+  播放器，所以唤醒后会暂停、对话结束自动继续；专注结束时自动停止。
+
+RLCD-4.2 的 KEY 键（GPIO18）：单击暂停/继续（番茄钟运行时控制番茄钟，否则控制音乐），双击下一首，
+长按停止番茄钟和音乐。
 
 ## HTTP JSON API
 

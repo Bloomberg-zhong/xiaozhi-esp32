@@ -48,6 +48,7 @@ set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg"
 if(CONFIG_USE_MUSIC_PLAYER)
     list(APPEND SOURCES
         "music/lrc_parser.cc"
+        "music/local_music.cc"
         "music/music_util.cc"
         "music/music_source.cc"
         "music/subsonic_source.cc"
@@ -56,6 +57,10 @@ if(CONFIG_USE_MUSIC_PLAYER)
         "music/music_tools.cc"
     )
     list(APPEND INCLUDE_DIRS "music")
+endif()
+
+if(CONFIG_USE_POMODORO)
+    list(APPEND SOURCES "pomodoro/pomodoro.cc")
 endif()
 
 # Add board common files
@@ -1095,7 +1100,7 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT AND IDF_VERSION_MAJOR LESS 6)
         espressif__touch_button_sensor
     )
 endif()
-if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
+if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD OR CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         esp_driver_sdmmc
         sdmmc

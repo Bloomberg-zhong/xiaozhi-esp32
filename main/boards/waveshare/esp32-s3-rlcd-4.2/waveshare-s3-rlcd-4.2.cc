@@ -13,6 +13,13 @@
 #include "lvgl.h"
 #include "power_save_timer.h"
 #include "settings.h"
+#if CONFIG_USE_POMODORO
+#include "pomodoro/pomodoro.h"
+#endif
+
+#include <driver/sdmmc_host.h>
+#include <esp_vfs_fat.h>
+#include <sdmmc_cmd.h>
 
 #define TAG "waveshare_rlcd_4_2"
 
@@ -24,7 +31,9 @@ class CustomBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
+    Button user_button_;
     CustomLcdDisplay *display_;
+    sdmmc_card_t* sd_card_ = nullptr;
     PowerSaveTimer* power_save_timer_ = nullptr;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
@@ -41,6 +50,71 @@ private:
         i2c_bus_cfg.trans_queue_depth = 0;
         i2c_bus_cfg.flags.enable_internal_pullup = 1;
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    void InitializeSdCard() {
+        esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+        mount_config.format_if_mount_failed = false;  // Never touch the user's card
+        mount_config.max_files = 4;
+        mount_config.allocation_unit_size = 16 * 1024;
+
+        sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot_config.width = 1;
+        slot_config.clk = SD_CARD_CLK_PIN;
+        slot_config.cmd = SD_CARD_CMD_PIN;
+        slot_config.d0 = SD_CARD_D0_PIN;
+        slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+        esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_CARD_MOUNT_POINT, &host, &slot_config,
+                                                &mount_config, &sd_card_);
+        if (ret != ESP_OK) {
+            sd_card_ = nullptr;
+            ESP_LOGW(TAG, "No SD card mounted: %s", esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "SD card mounted at %s", SD_CARD_MOUNT_POINT);
+    }
+
+    // KEY: click pauses/resumes (the pomodoro when running, otherwise the
+    // music), double click skips to the next song, long press stops both.
+    void InitializeUserButton() {
+        user_button_.OnClick([this]() {
+            power_save_timer_->WakeUp();
+#if CONFIG_USE_POMODORO
+            if (Pomodoro::GetInstance().IsActive()) {
+                Pomodoro::GetInstance().TogglePause();
+                return;
+            }
+#endif
+#if CONFIG_USE_MUSIC_PLAYER
+            auto& app = Application::GetInstance();
+            auto& player = app.GetMusicPlayer();
+            if (player.IsPlaying()) {
+                app.PauseMusic();
+            } else if (player.HasTrack()) {
+                app.PlayMusic(false);
+            }
+#endif
+        });
+        user_button_.OnDoubleClick([this]() {
+            power_save_timer_->WakeUp();
+#if CONFIG_USE_MUSIC_PLAYER
+            auto& app = Application::GetInstance();
+            if (app.GetMusicPlayer().HasTrack()) {
+                app.SkipMusic(true);
+            }
+#endif
+        });
+        user_button_.OnLongPress([this]() {
+            power_save_timer_->WakeUp();
+#if CONFIG_USE_POMODORO
+            Pomodoro::GetInstance().Stop();
+#endif
+#if CONFIG_USE_MUSIC_PLAYER
+            Application::GetInstance().StopMusic();
+#endif
+        });
     }
 
     void InitializePowerSaveTimer() {
@@ -162,9 +236,13 @@ private:
     }
 
 public:
-    CustomBoard() : boot_button_(BOOT_BUTTON_GPIO, false, 0, 0, true) {
+    CustomBoard()
+        : boot_button_(BOOT_BUTTON_GPIO, false, 0, 0, true),
+          user_button_(USER_BUTTON_GPIO, false, 0, 0, true) {
         InitializeI2c();  
         InitializeButtons();     
+        InitializeUserButton();
+        InitializeSdCard();
         InitializeTools();
         InitializeLcdDisplay();
         InitializePowerSaveTimer();
@@ -189,6 +267,10 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    virtual const char* GetLocalMusicPath() override {
+        return sd_card_ != nullptr ? SD_CARD_MOUNT_POINT : nullptr;
     }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
