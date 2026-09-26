@@ -11,15 +11,21 @@
 #include "wifi_station.h"
 #include "mcp_server.h"
 #include "lvgl.h"
-#include "custom_lcd_display.h"
+#include "power_save_timer.h"
+#include "settings.h"
 
 #define TAG "waveshare_rlcd_4_2"
+
+// Idle time before power saving: wake word, microphone and the CPU go to
+// light sleep, and the panel switches to low power mode. Press BOOT to wake.
+#define POWER_SAVE_IDLE_SECONDS 180
 
 class CustomBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
     CustomLcdDisplay *display_;
+    PowerSaveTimer* power_save_timer_ = nullptr;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
     bool vbat_status = 0;
@@ -37,8 +43,16 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
     }
 
+    void InitializePowerSaveTimer() {
+        power_save_timer_ = new PowerSaveTimer(240, POWER_SAVE_IDLE_SECONDS, -1);
+        power_save_timer_->OnEnterSleepMode([this]() { display_->SetPowerSaveMode(true); });
+        power_save_timer_->OnExitSleepMode([this]() { display_->SetPowerSaveMode(false); });
+        power_save_timer_->SetEnabled(true);
+    }
+
     void InitializeButtons() { 
         boot_button_.OnClick([this]() {
+            power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -49,6 +63,7 @@ private:
 
 #if CONFIG_USE_DEVICE_AEC
         boot_button_.OnDoubleClick([this]() {
+            power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateIdle) {
                 app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
@@ -64,6 +79,23 @@ private:
             EnterWifiConfigMode();
             return true;
         });
+
+        mcp_server.AddTool(
+            "self.power.set_auto_sleep",
+            "Enable or disable automatic power saving. When enabled, after 3 idle minutes the "
+            "device stops listening for the wake word and sleeps to save battery; the user "
+            "presses the BOOT button to wake it. Disable it when the device is on USB power "
+            "and the wake word should always work.",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                {
+                    Settings settings("wifi", true);
+                    settings.SetBool("sleep_mode", enabled);
+                }
+                power_save_timer_->SetEnabled(enabled);
+                return true;
+            });
     }
 
     void InitializeLcdDisplay() {
@@ -130,11 +162,12 @@ private:
     }
 
 public:
-    CustomBoard() : boot_button_(BOOT_BUTTON_GPIO) {    
+    CustomBoard() : boot_button_(BOOT_BUTTON_GPIO, false, 0, 0, true) {
         InitializeI2c();  
         InitializeButtons();     
         InitializeTools();
         InitializeLcdDisplay();
+        InitializePowerSaveTimer();
    }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -156,6 +189,14 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        // Conversations, notifications and music raise the level: leave sleep.
+        if (level != PowerSaveLevel::LOW_POWER && power_save_timer_ != nullptr) {
+            power_save_timer_->WakeUp();
+        }
+        WifiBoard::SetPowerSaveLevel(level);
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {

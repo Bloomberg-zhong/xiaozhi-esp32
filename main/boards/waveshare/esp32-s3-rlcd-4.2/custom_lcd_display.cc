@@ -124,6 +124,14 @@ height_(height)
 CustomLcdDisplay::~CustomLcdDisplay() {
 }
 
+void CustomLcdDisplay::SetPowerSaveMode(bool on) {
+    LcdDisplay::SetPowerSaveMode(on);
+    // Hold the LVGL lock so the command cannot interleave with a frame
+    // transfer started by the flush callback.
+    DisplayLockGuard lock(this);
+    RLCD_SendCommand(on ? 0x39 : 0x38);  // LPM ON : HPM ON
+}
+
 void CustomLcdDisplay::InitPortraitLUT() {
     uint16_t W4 = width_ >> 2;
     for (uint16_t y = 0; y < height_; y++)

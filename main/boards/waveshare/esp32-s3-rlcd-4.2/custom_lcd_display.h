@@ -48,6 +48,9 @@ public:
                   int width, int height, int offset_x, int offset_y,
                   bool mirror_x, bool mirror_y, bool swap_xy,spi_display_config_t spiconfig,spi_host_device_t spi_host = SPI3_HOST);
     ~CustomLcdDisplay();
+    // Switches the ST7305 controller between high power mode (fast refresh)
+    // and low power mode (slow refresh, a fraction of the panel current).
+    virtual void SetPowerSaveMode(bool on) override;
     void RLCD_Init();
     void RLCD_ColorClear(uint8_t color);
     void RLCD_Display();
