@@ -59,7 +59,13 @@ bool MusicHttpGet(const std::string& url, size_t max_bytes, std::string& body, s
             error = "cannot connect to the music server";
             return false;
         }
-        const int status = http->GetStatusCode();
+        auto status_result = http->GetStatusCode();
+        if (!status_result) {
+            http->Close();
+            error = "cannot read the music server response";
+            return false;
+        }
+        const int status = *status_result;
         if (status >= 300 && status < 400) {
             std::string location = http->GetResponseHeader("Location");
             http->Close();
@@ -79,7 +85,8 @@ bool MusicHttpGet(const std::string& url, size_t max_bytes, std::string& body, s
         body.clear();
         std::array<char, 1024> buffer;
         while (true) {
-            int size = http->Read(buffer.data(), buffer.size());
+            auto read = http->Read(buffer.data(), buffer.size());
+            int size = read ? *read : -1;
             if (size < 0) {
                 http->Close();
                 error = "failed to read the response";

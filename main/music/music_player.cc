@@ -456,11 +456,17 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
         if (session.source) {
             session.source->ApplyHeaders(url, *http);
         }
-        if (!http->Open("GET", url)) {
-            ESP_LOGW(TAG, "Failed to open the music stream: %d", http->GetLastError());
+        auto opened = http->Open("GET", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "Failed to open the music stream: %s", opened.error().ToString().c_str());
             return nullptr;
         }
-        const int status = http->GetStatusCode();
+        auto status_result = http->GetStatusCode();
+        if (!status_result) {
+            http->Close();
+            return nullptr;
+        }
+        const int status = *status_result;
         if (status >= 300 && status < 400) {
             std::string location = http->GetResponseHeader("Location");
             http->Close();
@@ -490,7 +496,8 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
         char discard[512];
         size_t skipped = 0;
         while (skipped < offset && !session.cancelled) {
-            int size = http->Read(discard, std::min(sizeof(discard), offset - skipped));
+            auto read = http->Read(discard, std::min(sizeof(discard), offset - skipped));
+            int size = read ? *read : -1;
             if (size <= 0) {
                 http->Close();
                 return nullptr;
@@ -538,7 +545,8 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
         auto http = OpenStream(*session, received, total);
         if (http) {
             while (!session->cancelled) {
-                int size = http->Read(chunk.data(), chunk.size());
+                auto read = http->Read(chunk.data(), chunk.size());
+                int size = read ? *read : -1;
                 if (size < 0) {
                     break;
                 }
