@@ -234,7 +234,7 @@ void CustomLcdDisplay::SetupDashboardUI() {
     lv_label_set_text(dashboard_memo_count_label_, "0 条备忘");
 
     RefreshDashboard();
-    dashboard_timer_ = lv_timer_create(DashboardTimerCallback, 1000, this);
+    dashboard_timer_ = lv_timer_create(DashboardTimerCallback, 30000, this);
 }
 
 void CustomLcdDisplay::RefreshDashboard() {
@@ -252,9 +252,13 @@ void CustomLcdDisplay::RefreshDashboard() {
 
     char clock[8];
     std::strftime(clock, sizeof(clock), "%H:%M", &local_time);
-    lv_label_set_text(dashboard_time_label_, clock);
+    if (std::strcmp(lv_label_get_text(dashboard_time_label_), clock) != 0) {
+        lv_label_set_text(dashboard_time_label_, clock);
+    }
     const std::string date = rlcd_dashboard::FormatHomeDate(local_time);
-    lv_label_set_text(dashboard_date_label_, date.c_str());
+    if (std::strcmp(lv_label_get_text(dashboard_date_label_), date.c_str()) != 0) {
+        lv_label_set_text(dashboard_date_label_, date.c_str());
+    }
 
     rlcd_dashboard::BluetoothState bluetooth_state = rlcd_dashboard::BluetoothState::kDisabled;
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
@@ -264,11 +268,20 @@ void CustomLcdDisplay::RefreshDashboard() {
                                                     : rlcd_dashboard::BluetoothState::kDisconnected)
                           : rlcd_dashboard::BluetoothState::kDisabled;
 #endif
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     const char* bluetooth_status =
         bluetooth_state == rlcd_dashboard::BluetoothState::kConnected      ? "已连接"
         : bluetooth_state == rlcd_dashboard::BluetoothState::kDisconnected ? "未连接"
                                                                            : "关闭";
-    lv_label_set_text(dashboard_bluetooth_label_, bluetooth_status);
+    lv_obj_clear_flag(dashboard_bluetooth_icon_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(dashboard_bluetooth_label_, LV_OBJ_FLAG_HIDDEN);
+    if (std::strcmp(lv_label_get_text(dashboard_bluetooth_label_), bluetooth_status) != 0) {
+        lv_label_set_text(dashboard_bluetooth_label_, bluetooth_status);
+    }
+#else
+    lv_obj_add_flag(dashboard_bluetooth_icon_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(dashboard_bluetooth_label_, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     const auto weather = rlcd_dashboard::DashboardStore::Instance().GetWeather();
     if (weather.IsValid()) {

@@ -5,6 +5,7 @@
 #include "settings.h"
 
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
@@ -124,6 +125,34 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     // lv image cache, currently only PNG is supported
     size_t psram_size_mb = esp_psram_get_size() / 1024 / 1024;
     if (psram_size_mb >= 8) {
+#if CONFIG_LV_USE_BUILTIN_MALLOC
+        // Base TLSF pool is CONFIG_LV_MEM_SIZE_KILOBYTES in PSRAM; grow it so
+        // the 2MB decoded-image cache does not exhaust a 2MB-PSRAM-safe pool.
+        // TLSF rejects any single pool larger than LV_MEM_SIZE when
+        // LV_MEM_POOL_EXPAND_SIZE is 0 (block_size_max = 1 << ceil(log2(LV_MEM_SIZE))).
+        const size_t extra_total = 2560 * 1024;
+        const size_t chunk_size = LV_MEM_SIZE;
+        size_t added = 0;
+        while (added < extra_total) {
+            size_t this_chunk = extra_total - added;
+            if (this_chunk > chunk_size) {
+                this_chunk = chunk_size;
+            }
+            void* pool = heap_caps_malloc(this_chunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (pool == nullptr || lv_mem_add_pool(pool, this_chunk) == nullptr) {
+                if (pool != nullptr) {
+                    heap_caps_free(pool);
+                }
+                ESP_LOGE(TAG, "Failed to add %uKB LVGL PSRAM pool (added %uKB)",
+                         (unsigned)(this_chunk / 1024), (unsigned)(added / 1024));
+                break;
+            }
+            added += this_chunk;
+        }
+        if (added == extra_total) {
+            ESP_LOGI(TAG, "Added %uKB LVGL pool in PSRAM", (unsigned)(added / 1024));
+        }
+#endif
         lv_image_cache_resize(2 * 1024 * 1024, true);
         ESP_LOGI(TAG, "Use 2MB of PSRAM for image cache");
     } else if (psram_size_mb >= 2) {
@@ -141,6 +170,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
+    // SPI LCD still needs an internal DMA bounce buffer for PSRAM sources.
+    // A full-frame transfer (~150KB) cannot allocate that bounce buffer, so
+    // keep a small DMA strip in internal SRAM and partial refresh.
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
@@ -944,11 +976,16 @@ void LcdDisplay::SetupUI() {
     lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
     lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
-#if CONFIG_USE_MULTILINE_CHAT_MESSAGE
-    /* Bottom bar - auto height, grows upward with wrapped text */
+#if CONFIG_USE_MULTILINE_CHAT_MESSAGE || CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
+    /* Bottom chat panel - RLCD keeps a fixed two-line cap for streamed subtitles. */
     bottom_bar_ = lv_obj_create(screen);
     lv_obj_set_width(bottom_bar_, LV_HOR_RES);
+#if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
+    const lv_coord_t chat_panel_height = text_font->line_height * 2 + lvgl_theme->spacing(8);
+    lv_obj_set_height(bottom_bar_, chat_panel_height);
+#else
     lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
+#endif
     lv_obj_set_style_radius(bottom_bar_, 0, 0);
     lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_50, 0);
@@ -962,10 +999,17 @@ void LcdDisplay::SetupUI() {
     chat_message_label_ = lv_label_create(bottom_bar_);
     lv_label_set_text(chat_message_label_, "");
     lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8));
+#if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
+    lv_obj_set_height(chat_message_label_, text_font->line_height * 2);
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(chat_message_label_, LV_ALIGN_TOP_LEFT, 0, 0);
+#else
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
     lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0);
+#endif
+    lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
     lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);  // Hide until there is content
 #else
     /* Top layer: Bottom bar - fixed height at bottom */

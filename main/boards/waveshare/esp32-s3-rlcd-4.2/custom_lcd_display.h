@@ -32,6 +32,8 @@ private:
     int width_;
     int height_;
     uint8_t* DispBuffer = NULL;
+    uint8_t* last_sent_buffer_ = NULL;
+    bool last_sent_buffer_valid_ = false;
     int DisplayLen;
     uint16_t (*PixelIndexLUT)[300];
     uint8_t (*PixelBitLUT)[300];

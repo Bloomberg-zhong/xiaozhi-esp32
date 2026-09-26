@@ -21,16 +21,25 @@ void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area
         return;
     }
     uint16_t *buffer = (uint16_t *)color_p;
-  	for(int y = area->y1; y <= area->y2; y++)
+    for(int y = area->y1; y <= area->y2; y++)
   	{
   	 	for(int x = area->x1; x <= area->x2; x++) 
   	 	{
   	 	   	uint8_t color = (*buffer < 0x7fff) ? ColorBlack : ColorWhite;
   	 	   	Disp->RLCD_SetPixel(x,y,color);
   	 	   	buffer++;
-  	 	}
-  	}
-  	Disp->RLCD_Display();
+	  }
+	}
+
+    if (Disp->last_sent_buffer_valid_ &&
+        memcmp(Disp->DispBuffer, Disp->last_sent_buffer_, Disp->DisplayLen) == 0) {
+        Disp->flush_coordinator_.CompleteFlush();
+        lv_disp_flush_ready(disp);
+        return;
+    }
+    memcpy(Disp->last_sent_buffer_, Disp->DispBuffer, Disp->DisplayLen);
+    Disp->last_sent_buffer_valid_ = true;
+    Disp->RLCD_Display();
 }
 
 bool CustomLcdDisplay::OnColorTransferDone(esp_lcd_panel_io_handle_t,
@@ -94,6 +103,8 @@ height_(height)
     DisplayLen                = transfer >> 3; //(1byte 8ipex)
     DispBuffer                = (uint8_t *) heap_caps_malloc(DisplayLen, MALLOC_CAP_SPIRAM);
     assert(DispBuffer);
+	last_sent_buffer_ = (uint8_t*)heap_caps_malloc(DisplayLen, MALLOC_CAP_SPIRAM);
+	assert(last_sent_buffer_);
 	PixelIndexLUT = (uint16_t (*)[300])heap_caps_malloc(transfer * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
 	PixelBitLUT   = (uint8_t (*)[300])heap_caps_malloc(transfer * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     assert(PixelIndexLUT);
@@ -143,6 +154,8 @@ CustomLcdDisplay::~CustomLcdDisplay() {
         lv_timer_delete(dashboard_timer_);
         dashboard_timer_ = nullptr;
     }
+    heap_caps_free(last_sent_buffer_);
+    last_sent_buffer_ = nullptr;
 }
 
 void CustomLcdDisplay::InitPortraitLUT() {

@@ -373,8 +373,10 @@ public:
     virtual Display* GetDisplay() override { return display_; }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        // The charger STAT output drives the board's LED and is not connected to an MCU GPIO.
+        // Report voltage-derived battery level only; charging state is not observable here.
         charging = false;
-        discharging = !charging;
+        discharging = false;
         level = (int)BatterygetPercent();
 
         return true;

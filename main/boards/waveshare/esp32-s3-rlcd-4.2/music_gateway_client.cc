@@ -254,9 +254,10 @@ bool MusicGatewayClient::GetJson(const std::string& url, std::string& body,
         http->Close();
         return false;
     }
-    const int status = http->GetStatusCode();
-    if (status < 200 || status >= 300) {
-        error = "音乐网关请求失败，HTTP " + std::to_string(status);
+    auto status = http->GetStatusCode();
+    if (!status || *status < 200 || *status >= 300) {
+        error = status ? "音乐网关请求失败，HTTP " + std::to_string(*status)
+                       : "无法读取音乐网关响应状态";
         http->Close();
         return false;
     }
@@ -274,12 +275,13 @@ bool MusicGatewayClient::GetJson(const std::string& url, std::string& body,
     std::array<char, 1024> buffer;
     while (body.size() < kMaxJsonBytes) {
         const size_t remaining = kMaxJsonBytes - body.size();
-        const int size = http->Read(buffer.data(), std::min(buffer.size(), remaining));
-        if (size < 0) {
+        auto read = http->Read(buffer.data(), std::min(buffer.size(), remaining));
+        if (!read) {
             error = "读取音乐网关响应失败";
             http->Close();
             return false;
         }
+        const int size = *read;
         if (size == 0) {
             break;
         }
