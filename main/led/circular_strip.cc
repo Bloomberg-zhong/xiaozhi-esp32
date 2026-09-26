@@ -210,7 +210,8 @@ void CircularStrip::OnStateChanged() {
             break;
         }
         case kDeviceStateSpeaking:
-        case kDeviceStateNotifying: {
+        case kDeviceStateNotifying:
+        case kDeviceStatePlaying: {
             StripColor color = { low_brightness_, default_brightness_, low_brightness_ };
             SetAllColor(color);
             break;

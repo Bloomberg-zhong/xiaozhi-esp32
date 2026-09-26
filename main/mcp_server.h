@@ -1,6 +1,7 @@
 #ifndef MCP_SERVER_H
 #define MCP_SERVER_H
 
+#include <atomic>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -264,6 +265,7 @@ private:
     PropertyList properties_;
     ToolCallback callback_;
     bool user_only_ = false;
+    bool async_ = false;
 
 public:
     McpTool(const std::string& name, const std::string& description, const PropertyList& properties,
@@ -271,10 +273,14 @@ public:
         : name_(name), description_(description), properties_(properties), callback_(callback) {}
 
     void set_user_only(bool user_only) { user_only_ = user_only; }
+    // Async tools run in a background task instead of the main loop. Use this
+    // for tools doing network I/O; their callbacks must be thread-safe.
+    void set_async(bool async) { async_ = async; }
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
     inline const PropertyList& properties() const { return properties_; }
     inline bool user_only() const { return user_only_; }
+    inline bool async() const { return async_; }
 
     std::string to_json() const {
         std::vector<std::string> required = properties_.GetRequired();
@@ -455,7 +461,11 @@ private:
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
                     ResponseSender response_sender);
 
+    void StartAsyncToolCall(int id, McpTool* tool, PropertyList arguments,
+                            ResponseSender response_sender);
+
     std::vector<std::unique_ptr<McpTool>> tools_;
+    std::atomic<bool> async_call_running_{false};
 };
 
 #endif  // MCP_SERVER_H

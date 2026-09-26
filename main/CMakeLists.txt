@@ -45,6 +45,19 @@ set(SOURCES "audio/audio_codec.cc"
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
+if(CONFIG_USE_MUSIC_PLAYER)
+    list(APPEND SOURCES
+        "music/lrc_parser.cc"
+        "music/music_util.cc"
+        "music/music_source.cc"
+        "music/subsonic_source.cc"
+        "music/http_api_source.cc"
+        "music/music_player.cc"
+        "music/music_tools.cc"
+    )
+    list(APPEND INCLUDE_DIRS "music")
+endif()
+
 # Add board common files
 list(APPEND SOURCES
     "boards/common/board.cc"

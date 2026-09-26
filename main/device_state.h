@@ -10,6 +10,7 @@ enum DeviceState {
     kDeviceStateListening,
     kDeviceStateSpeaking,
     kDeviceStateNotifying,
+    kDeviceStatePlaying,
     kDeviceStateUpgrading,
     kDeviceStateActivating,
     kDeviceStateAudioTesting,

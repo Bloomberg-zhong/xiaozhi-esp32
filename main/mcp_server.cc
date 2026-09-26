@@ -18,6 +18,9 @@
 #include "lvgl_image.h"
 #include "lvgl_theme.h"
 #include "settings.h"
+#if CONFIG_USE_MUSIC_PLAYER
+#include "music/music_tools.h"
+#endif
 
 #define TAG "MCP"
 
@@ -114,6 +117,10 @@ void McpServer::AddCommonTools() {
                     return std::move(*result);
                 });
     }
+#endif
+
+#if CONFIG_USE_MUSIC_PLAYER
+    AddMusicTools(*this);
 #endif
 
     // Restore the original tools list to the end of the tools list
@@ -324,6 +331,10 @@ void McpServer::AddUserOnlyTools() {
                         settings.SetString("download_url", url);
                         return true;
                     });
+
+#if CONFIG_USE_MUSIC_PLAYER
+    AddMusicUserOnlyTools(*this);
+#endif
 }
 
 void McpServer::AddTool(std::unique_ptr<McpTool> tool) {
@@ -611,6 +622,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         }
     }
 
+    if (tool->async()) {
+        StartAsyncToolCall(id, tool, std::move(arguments), std::move(response_sender));
+        return;
+    }
+
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool, arguments = std::move(arguments),
@@ -623,4 +639,44 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         }
         ReplyResult(id, *result, response_sender);
     });
+}
+
+void McpServer::StartAsyncToolCall(int id, McpTool* tool, PropertyList arguments,
+                                   ResponseSender response_sender) {
+    if (async_call_running_.exchange(true)) {
+        ReplyError(id, "Another tool call is still running, please retry later", response_sender);
+        return;
+    }
+
+    struct AsyncCall {
+        McpServer* server;
+        int id;
+        McpTool* tool;
+        PropertyList arguments;
+        ResponseSender response_sender;
+    };
+    auto* call = new AsyncCall{this, id, tool, std::move(arguments), response_sender};
+    auto task = [](void* arg) {
+        std::unique_ptr<AsyncCall> call(static_cast<AsyncCall*>(arg));
+        auto result = call->tool->Call(call->arguments);
+        call->server->async_call_running_ = false;
+        // Reply from the main task like synchronous tools do.
+        Application::GetInstance().Schedule(
+            [server = call->server, id = call->id, result = std::move(result),
+             response_sender = std::move(call->response_sender)]() {
+                if (!result) {
+                    ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
+                    server->ReplyError(id, result.error(), response_sender);
+                    return;
+                }
+                server->ReplyResult(id, *result, response_sender);
+            });
+        call.reset();
+        vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(task, "mcp_async", 8192, call, 2, nullptr) != pdPASS) {
+        delete call;
+        async_call_running_ = false;
+        ReplyError(id, "Failed to start the tool task", response_sender);
+    }
 }

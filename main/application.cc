@@ -11,6 +11,9 @@
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#if CONFIG_USE_MUSIC_PLAYER
+#include "music/music_tools.h"
+#endif
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -21,7 +24,13 @@
 
 #define TAG "Application"
 
-Application::Application() : notify_player_(audio_service_) {
+Application::Application()
+    : notify_player_(audio_service_)
+#if CONFIG_USE_MUSIC_PLAYER
+      ,
+      music_player_(audio_service_)
+#endif
+{
     event_group_ = xEventGroupCreate();
 
 #if CONFIG_USE_DEVICE_AEC && CONFIG_USE_SERVER_AEC
@@ -90,8 +99,29 @@ void Application::Initialize() {
     };
     callbacks.on_playback_progress = [this](uint32_t playback_id, uint32_t media_position_ms) {
         notify_player_.OnPlaybackProgress(playback_id, media_position_ms);
+#if CONFIG_USE_MUSIC_PLAYER
+        music_player_.OnPlaybackProgress(playback_id, media_position_ms);
+#endif
     };
     audio_service_.SetCallbacks(callbacks);
+
+#if CONFIG_USE_MUSIC_PLAYER
+    LoadMusicSettings(music_player_);
+    music_player_.SetCallbacks(
+        [this](uint32_t session_id, const std::string& text) {
+            Schedule([this, session_id, text]() {
+                if (GetDeviceState() == kDeviceStatePlaying &&
+                    music_player_.session_id() == session_id) {
+                    Board::GetInstance().GetDisplay()->SetChatMessage("assistant", text.c_str());
+                }
+            });
+        },
+        [this](uint32_t session_id, bool success, const std::string& error) {
+            Schedule([this, session_id, success, error]() {
+                HandleMusicFinished(session_id, success, error);
+            });
+        });
+#endif
 
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
@@ -216,6 +246,13 @@ void Application::Run() {
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
             }
+#if CONFIG_USE_MUSIC_PLAYER
+            music_player_.OnPlaybackDrained();
+            if (pending_music_start_ && audio_service_.IsPlaybackIdle()) {
+                pending_music_start_ = false;
+                TryStartMusic();
+            }
+#endif
             // Deferred listening start (auto mode): the playback queue has
             // drained, so it is now safe to enable voice processing.
             if (pending_listening_start_ && GetDeviceState() == kDeviceStateListening &&
@@ -570,9 +607,18 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
+#if CONFIG_USE_MUSIC_PLAYER
+            // The channel may close after music has already taken over.
+            if (GetDeviceState() == kDeviceStatePlaying) {
+                return;
+            }
+#endif
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
+#if CONFIG_USE_MUSIC_PLAYER
+            TryStartMusic();
+#endif
         });
     });
 
@@ -629,6 +675,15 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
+#if CONFIG_USE_MUSIC_PLAYER
+                        if (music_player_.WantsPlayback() && music_player_.HasTrack()) {
+                            // Like a smart speaker: end the conversation after the
+                            // reply and continue with the music.
+                            protocol_->CloseAudioChannel();
+                            SetDeviceState(kDeviceStateIdle);
+                            return;
+                        }
+#endif
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
@@ -780,6 +835,13 @@ void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
+#if CONFIG_USE_MUSIC_PLAYER
+    if (state == kDeviceStatePlaying) {
+        SuspendMusicForChat();
+        state = kDeviceStateIdle;
+    }
+#endif
+
     if (state == kDeviceStateNotifying) {
         StopNotification();
         state = kDeviceStateIdle;
@@ -843,6 +905,13 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
+
+#if CONFIG_USE_MUSIC_PLAYER
+    if (state == kDeviceStatePlaying) {
+        SuspendMusicForChat();
+        state = kDeviceStateIdle;
+    }
+#endif
 
     if (state == kDeviceStateNotifying) {
         StopNotification();
@@ -908,6 +977,11 @@ void Application::HandleWakeWordDetectedEvent() {
     } else if (state == kDeviceStateNotifying) {
         StopNotification();
         BeginWakeWordInvoke(wake_word);
+#if CONFIG_USE_MUSIC_PLAYER
+    } else if (state == kDeviceStatePlaying) {
+        SuspendMusicForChat();
+        BeginWakeWordInvoke(wake_word);
+#endif
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
@@ -998,6 +1072,14 @@ void Application::HandleStateChangedEvent() {
     // Any state change invalidates a pending deferred listening start;
     // the Listening case below re-arms it when needed.
     pending_listening_start_ = false;
+#if CONFIG_USE_MUSIC_PLAYER
+    pending_music_start_ = false;
+    if (new_state != kDeviceStatePlaying && music_player_.IsPlaying()) {
+        // Another path left the playing state; never keep music running
+        // underneath a conversation.
+        music_player_.Pause();
+    }
+#endif
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -1018,6 +1100,9 @@ void Application::HandleStateChangedEvent() {
             }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
+#if CONFIG_USE_MUSIC_PLAYER
+            TryStartMusic();
+#endif
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -1058,6 +1143,14 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             break;
+#if CONFIG_USE_MUSIC_PLAYER
+        case kDeviceStatePlaying:
+            // Like notifications, only AFE wake words can interrupt playback.
+            audio_service_.EnableVoiceProcessing(false);
+            audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+            ShowMusicTrack();
+            break;
+#endif
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(false);
@@ -1164,6 +1257,130 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
     StopNotification();
 }
 
+#if CONFIG_USE_MUSIC_PLAYER
+void Application::PlayMusic(bool restart) {
+    Schedule([this, restart]() {
+        if (restart) {
+            music_player_.Stop();
+        }
+        music_failures_ = 0;
+        music_player_.SetWantsPlayback(true);
+        TryStartMusic();
+    });
+}
+
+void Application::PauseMusic() {
+    Schedule([this]() {
+        music_player_.SetWantsPlayback(false);
+        music_player_.Pause();
+        pending_music_start_ = false;
+        if (GetDeviceState() == kDeviceStatePlaying) {
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+            SetDeviceState(kDeviceStateIdle);
+        }
+    });
+}
+
+void Application::StopMusic() {
+    Schedule([this]() { StopMusicPlayback(); });
+}
+
+void Application::SkipMusic(bool forward) {
+    Schedule([this, forward]() {
+        music_player_.Stop();
+        if (forward ? music_player_.MoveNext(false) : music_player_.MovePrevious()) {
+            music_failures_ = 0;
+            music_player_.SetWantsPlayback(true);
+            TryStartMusic();
+        } else {
+            StopMusicPlayback();
+        }
+    });
+}
+
+void Application::TryStartMusic() {
+    if (!music_player_.WantsPlayback() || !music_player_.HasTrack()) {
+        return;
+    }
+    auto state = GetDeviceState();
+    if (state == kDeviceStatePlaying) {
+        // Switching tracks while already playing.
+        if (music_player_.Play() == 0) {
+            StopMusicPlayback();
+        } else {
+            ShowMusicTrack();
+        }
+        return;
+    }
+    // During a conversation the music waits; it starts once the device is idle
+    // again and the channel is closed.
+    if (state != kDeviceStateIdle || (protocol_ && protocol_->IsAudioChannelOpened())) {
+        return;
+    }
+    if (!audio_service_.IsPlaybackIdle()) {
+        // Let the spoken reply finish first (MAIN_EVENT_PLAYBACK_DRAINED).
+        pending_music_start_ = true;
+        return;
+    }
+    if (music_player_.Play() == 0) {
+        music_player_.SetWantsPlayback(false);
+        return;
+    }
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    SetDeviceState(kDeviceStatePlaying);
+}
+
+void Application::SuspendMusicForChat() {
+    // Keep WantsPlayback() so the music resumes after the conversation.
+    music_player_.Pause();
+    pending_music_start_ = false;
+    SetDeviceState(kDeviceStateIdle);
+}
+
+void Application::StopMusicPlayback() {
+    music_player_.SetWantsPlayback(false);
+    music_player_.Stop();
+    pending_music_start_ = false;
+    if (GetDeviceState() == kDeviceStatePlaying) {
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        SetDeviceState(kDeviceStateIdle);
+    }
+}
+
+void Application::ShowMusicTrack() {
+    MusicTrack track;
+    if (!music_player_.GetCurrentTrack(track)) {
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    std::string info = track.artist.empty() ? track.title : track.title + " - " + track.artist;
+    display->SetStatus(track.title.c_str());
+    display->SetEmotion("happy");
+    display->SetChatMessage("assistant", info.c_str());
+}
+
+void Application::HandleMusicFinished(uint32_t session_id, bool success, const std::string& error) {
+    constexpr int kMaxConsecutiveFailures = 3;
+    if (session_id != music_player_.session_id()) {
+        return;
+    }
+    music_player_.Stop();
+    if (success) {
+        music_failures_ = 0;
+    } else if (++music_failures_ >= kMaxConsecutiveFailures) {
+        StopMusicPlayback();
+        Alert(Lang::Strings::ERROR, error.c_str(), "sad", Lang::Sounds::OGG_EXCLAMATION);
+        return;
+    }
+    // A failed track is skipped like a manual "next".
+    if (!music_player_.MoveNext(success)) {
+        StopMusicPlayback();
+        return;
+    }
+    TryStartMusic();
+}
+#endif
+
 void Application::Schedule(std::function<void()>&& callback) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1194,6 +1411,9 @@ void Application::Reboot() {
     if (GetDeviceState() == kDeviceStateNotifying) {
         StopNotification();
     }
+#if CONFIG_USE_MUSIC_PLAYER
+    StopMusicPlayback();
+#endif
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
@@ -1215,6 +1435,9 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     if (GetDeviceState() == kDeviceStateNotifying) {
         StopNotification();
     }
+#if CONFIG_USE_MUSIC_PLAYER
+    StopMusicPlayback();
+#endif
 
     // Close audio channel if it's open
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -1286,6 +1509,15 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
                 BeginWakeWordInvoke(wake_word);
             }
         });
+#if CONFIG_USE_MUSIC_PLAYER
+    } else if (state == kDeviceStatePlaying) {
+        Schedule([this, wake_word]() {
+            if (GetDeviceState() == kDeviceStatePlaying) {
+                SuspendMusicForChat();
+                BeginWakeWordInvoke(wake_word);
+            }
+        });
+#endif
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() { AbortSpeaking(kAbortReasonNone); });
     } else if (state == kDeviceStateListening) {
@@ -1364,6 +1596,9 @@ void Application::ResetProtocol() {
         if (GetDeviceState() == kDeviceStateNotifying) {
             StopNotification();
         }
+#if CONFIG_USE_MUSIC_PLAYER
+        StopMusicPlayback();
+#endif
         // Close audio channel if opened
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();

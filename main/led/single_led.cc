@@ -150,6 +150,7 @@ void SingleLed::OnStateChanged() {
             break;
         case kDeviceStateSpeaking:
         case kDeviceStateNotifying:
+        case kDeviceStatePlaying:
             SetColor(0, DEFAULT_BRIGHTNESS, 0);
             TurnOn();
             break;

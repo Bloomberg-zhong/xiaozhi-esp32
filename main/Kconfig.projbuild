@@ -1016,6 +1016,66 @@ config RECEIVE_CUSTOM_MESSAGE
     help
         Enable custom message reception, allow the device to receive custom messages from the server (preferably through the MQTT protocol)
 
+menu "Music Player"
+    config USE_MUSIC_PLAYER
+        bool "Enable music player"
+        default n
+        depends on SPIRAM
+        help
+            Adds a smart-speaker style music player controlled by voice through
+            the self.music.* MCP tools. Songs are searched and streamed from a
+            self-hosted library (Subsonic/Navidrome or the HTTP JSON API in
+            docs/music-player.md) and decoded on the device (MP3, AAC, M4A,
+            FLAC, WAV). Requires PSRAM for the stream buffer.
+
+    config MUSIC_PLAYER_STREAM_BUFFER_KB
+        int "Stream buffer size (KB)"
+        default 256
+        range 32 2048
+        depends on USE_MUSIC_PLAYER
+        help
+            Compressed audio buffered ahead of playback, allocated in PSRAM.
+            256 KB holds about 16 seconds of 128 kbps MP3.
+
+    choice MUSIC_SOURCE_DEFAULT_TYPE
+        prompt "Default music source"
+        default MUSIC_SOURCE_DEFAULT_NONE
+        depends on USE_MUSIC_PLAYER
+        help
+            Used until a source is configured at runtime with the
+            self.music.configure_source console tool.
+        config MUSIC_SOURCE_DEFAULT_NONE
+            bool "None"
+        config MUSIC_SOURCE_DEFAULT_SUBSONIC
+            bool "Subsonic / Navidrome"
+        config MUSIC_SOURCE_DEFAULT_HTTP_API
+            bool "HTTP JSON API"
+    endchoice
+
+    config MUSIC_SOURCE_DEFAULT_URL
+        string "Music server URL"
+        default "http://192.168.1.10:4533"
+        depends on MUSIC_SOURCE_DEFAULT_SUBSONIC || MUSIC_SOURCE_DEFAULT_HTTP_API
+
+    config MUSIC_SOURCE_DEFAULT_USERNAME
+        string "Subsonic username"
+        default ""
+        depends on MUSIC_SOURCE_DEFAULT_SUBSONIC
+
+    config MUSIC_SOURCE_DEFAULT_PASSWORD
+        string "Subsonic password"
+        default ""
+        depends on MUSIC_SOURCE_DEFAULT_SUBSONIC
+        help
+            Stored in the firmware image. Prefer configuring the account at
+            runtime, which keeps only a salted token on the device.
+
+    config MUSIC_SOURCE_DEFAULT_API_KEY
+        string "HTTP API key (optional)"
+        default ""
+        depends on MUSIC_SOURCE_DEFAULT_HTTP_API
+endmenu
+
 menu "Camera Configuration"
     depends on !IDF_TARGET_ESP32
 

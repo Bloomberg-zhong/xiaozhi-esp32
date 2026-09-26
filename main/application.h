@@ -20,6 +20,9 @@
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "notify/notify_player.h"
+#if CONFIG_USE_MUSIC_PLAYER
+#include "music/music_player.h"
+#endif
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -118,6 +121,16 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+
+#if CONFIG_USE_MUSIC_PLAYER
+    MusicPlayer& GetMusicPlayer() { return music_player_; }
+    // Thread-safe music controls. Music only plays while no conversation is
+    // active: a request made during a conversation starts after the reply.
+    void PlayMusic(bool restart);
+    void PauseMusic();
+    void StopMusic();
+    void SkipMusic(bool forward);
+#endif
     
     /**
      * Reset protocol resources (thread-safe)
@@ -142,6 +155,11 @@ private:
     AudioService audio_service_;
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;
+#if CONFIG_USE_MUSIC_PLAYER
+    MusicPlayer music_player_;
+    bool pending_music_start_ = false;  // Waiting for the reply audio to drain
+    int music_failures_ = 0;
+#endif
     std::unique_ptr<Ota> ota_;
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
@@ -172,6 +190,13 @@ private:
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
+#if CONFIG_USE_MUSIC_PLAYER
+    void TryStartMusic();
+    void SuspendMusicForChat();
+    void StopMusicPlayback();
+    void ShowMusicTrack();
+    void HandleMusicFinished(uint32_t session_id, bool success, const std::string& error);
+#endif
 
     // Activation task (runs in background)
     void ActivationTask();

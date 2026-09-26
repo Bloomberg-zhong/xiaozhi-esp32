@@ -46,3 +46,9 @@ idf.py build
 idf.py build flash monitor
 ```
 
+
+# 音乐播放
+
+该板型默认启用 `CONFIG_USE_MUSIC_PLAYER`，可以用语音点歌（“播放周杰伦的稻香”“下一首”“暂停”）。
+音乐来自你自己的 Navidrome/Subsonic 服务器或本地音乐文件夹，配置方法见
+[docs/music-player.md](../../../../docs/music-player.md)。
