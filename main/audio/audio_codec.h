@@ -39,6 +39,10 @@ public:
     virtual void Start();
 
     inline bool duplex() const { return duplex_; }
+    // True when EnableOutput(false) only powers down the DAC and amplifier and
+    // leaves the I2S clocks running, so the output may be switched off while
+    // the input is still capturing.
+    inline bool output_power_independent() const { return output_power_independent_; }
     inline bool input_reference() const { return input_reference_; }
     inline int input_sample_rate() const { return input_sample_rate_; }
     inline int output_sample_rate() const { return output_sample_rate_; }
@@ -54,6 +58,7 @@ protected:
     i2s_chan_handle_t rx_handle_ = nullptr;
 
     bool duplex_ = false;
+    bool output_power_independent_ = false;
     bool input_reference_ = false;
     bool input_enabled_ = false;
     bool output_enabled_ = false;

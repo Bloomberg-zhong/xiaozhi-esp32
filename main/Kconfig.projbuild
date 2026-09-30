@@ -1037,25 +1037,42 @@ menu "Music Player"
             Compressed audio buffered ahead of playback, allocated in PSRAM.
             256 KB holds about 16 seconds of 128 kbps MP3.
 
+    config MUSIC_SERVER_URL
+        string "Music server URL"
+        default ""
+        depends on USE_MUSIC_PLAYER
+        help
+            Base URL (the domain) of your music server, see docs/music-player.md
+            and scripts/music_server. Example: https://music.example.com
+            Leave empty until the server is online. A server configured at
+            runtime with self.music.configure_source takes precedence.
+
+    config MUSIC_SERVER_API_KEY
+        string "Music server API key"
+        default ""
+        depends on USE_MUSIC_PLAYER
+        help
+            Sent as "Authorization: Bearer <key>" to the music server. Stored
+            in the firmware image; prefer configuring it at runtime if the
+            image is shared.
+
     choice MUSIC_SOURCE_DEFAULT_TYPE
-        prompt "Default music source"
+        prompt "Direct music source (without a music server)"
         default MUSIC_SOURCE_DEFAULT_NONE
         depends on USE_MUSIC_PLAYER
         help
-            Used until a source is configured at runtime with the
-            self.music.configure_source console tool.
+            Used when no music server URL is set and nothing was configured at
+            runtime with the self.music.configure_source console tool.
         config MUSIC_SOURCE_DEFAULT_NONE
             bool "None"
         config MUSIC_SOURCE_DEFAULT_SUBSONIC
             bool "Subsonic / Navidrome"
-        config MUSIC_SOURCE_DEFAULT_HTTP_API
-            bool "HTTP JSON API"
     endchoice
 
     config MUSIC_SOURCE_DEFAULT_URL
-        string "Music server URL"
+        string "Subsonic server URL"
         default "http://192.168.1.10:4533"
-        depends on MUSIC_SOURCE_DEFAULT_SUBSONIC || MUSIC_SOURCE_DEFAULT_HTTP_API
+        depends on MUSIC_SOURCE_DEFAULT_SUBSONIC
 
     config MUSIC_SOURCE_DEFAULT_USERNAME
         string "Subsonic username"
@@ -1069,11 +1086,6 @@ menu "Music Player"
         help
             Stored in the firmware image. Prefer configuring the account at
             runtime, which keeps only a salted token on the device.
-
-    config MUSIC_SOURCE_DEFAULT_API_KEY
-        string "HTTP API key (optional)"
-        default ""
-        depends on MUSIC_SOURCE_DEFAULT_HTTP_API
 endmenu
 
 config USE_POMODORO

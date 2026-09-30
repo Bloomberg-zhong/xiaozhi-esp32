@@ -61,6 +61,10 @@
         "POMODORO_MINUTES_LEFT": " min left",
         "POMODORO_FOCUS_DONE": "Focus finished, time for a break",
         "POMODORO_BREAK_DONE": "Break is over",
-        "POMODORO_DONE": "Pomodoro finished"
+        "POMODORO_DONE": "Pomodoro finished",
+        "MUSIC_MODE_SEQUENCE": "Play in order",
+        "MUSIC_MODE_REPEAT_ALL": "Repeat all",
+        "MUSIC_MODE_REPEAT_ONE": "Repeat one",
+        "MUSIC_MODE_SHUFFLE": "Shuffle"
     }
 }

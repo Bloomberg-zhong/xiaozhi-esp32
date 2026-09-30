@@ -12,6 +12,10 @@ BoxAudioCodec::BoxAudioCodec(void* i2c_master_handle, int input_sample_rate, int
                              uint8_t es7210_addr, bool input_reference, float input_gain,
                              int reference_gain_channel, float reference_gain) {
     duplex_ = true;                              // 是否双工
+    // Both I2S channels stay enabled (CreateDuplexChannels), and ES8311 (output)
+    // and ES7210 (input) are separate chips, so closing the output only turns off
+    // the DAC and the amplifier.
+    output_power_independent_ = true;
     input_reference_ = input_reference;          // 是否使用参考输入，实现回声消除
     input_channels_ = input_reference_ ? 2 : 1;  // 输入通道数
     input_sample_rate_ = input_sample_rate;

@@ -11,23 +11,46 @@
 #include "settings.h"
 #include "config.h"
 #include "board.h"
+#include "rlcd_pixel_map.h"
 
 void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
 {
     assert(disp != NULL);
     CustomLcdDisplay *Disp = (CustomLcdDisplay *)lv_display_get_user_data(disp);
     uint16_t *buffer = (uint16_t *)color_p;
-  	for(int y = area->y1; y <= area->y2; y++)
-  	{
-  	 	for(int x = area->x1; x <= area->x2; x++) 
-  	 	{
-  	 	   	uint8_t color = (*buffer < 0x7fff) ? ColorBlack : ColorWhite;
-  	 	   	Disp->RLCD_SetPixel(x,y,color);
-  	 	   	buffer++;
-  	 	}
-  	}
-  	Disp->RLCD_Display();
-	lv_disp_flush_ready(disp);
+    uint8_t* frame = Disp->DispBuffer;
+    const bool landscape = Disp->landscape_;
+    const int width = Disp->width_;
+    const int height = Disp->height_;
+    for (int y = area->y1; y <= area->y2; y++) {
+        for (int x = area->x1; x <= area->x2; x++) {
+            uint32_t index;
+            uint8_t mask;
+            RlcdPixelPosition(landscape, width, height, x, y, index, mask);
+            if (*buffer < 0x7fff) {
+                frame[index] &= ~mask;
+            } else {
+                frame[index] |= mask;
+            }
+            buffer++;
+        }
+    }
+    // LVGL is released from OnColorTransferDone() once the DMA has read the
+    // frame. Until then LVGL cannot start another flush, so the frame buffer
+    // is never modified while it is being sent, and the LVGL task no longer
+    // blocks (holding the display lock) on a full SPI transaction queue.
+    Disp->flush_in_flight_.store(true, std::memory_order_release);
+    Disp->RLCD_Display();
+}
+
+bool CustomLcdDisplay::OnColorTransferDone(esp_lcd_panel_io_handle_t,
+                                           esp_lcd_panel_io_event_data_t*, void* user_ctx) {
+    auto* display = static_cast<CustomLcdDisplay*>(user_ctx);
+    if (display != nullptr &&
+        display->flush_in_flight_.exchange(false, std::memory_order_acq_rel)) {
+        lv_display_flush_ready(display->display_);
+    }
+    return false;
 }
 
 CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
@@ -68,7 +91,7 @@ height_(height)
     io_config.lcd_cmd_bits = 8;
     io_config.lcd_param_bits = 8;
     io_config.spi_mode = 0;
-    io_config.trans_queue_depth = 7;
+    io_config.trans_queue_depth = 1;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)spi_host, &io_config, &io_handle));
     gpio_config_t gpio_conf = {};
     gpio_conf.intr_type     = GPIO_INTR_DISABLE;
@@ -82,15 +105,7 @@ height_(height)
     DisplayLen                = transfer >> 3; //(1byte 8ipex)
     DispBuffer                = (uint8_t *) heap_caps_malloc(DisplayLen, MALLOC_CAP_SPIRAM);
     assert(DispBuffer);
-	PixelIndexLUT = (uint16_t (*)[300])heap_caps_malloc(transfer * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-	PixelBitLUT   = (uint8_t (*)[300])heap_caps_malloc(transfer * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
-    assert(PixelIndexLUT);
-    assert(PixelBitLUT);
-    if(width_ == 400) {
-        InitLandscapeLUT();
-    } else {
-        InitPortraitLUT();
-    }
+    landscape_ = (width_ == 400);
 
     ESP_LOGI(TAG, "Initialize LVGL library");
     lv_init();
@@ -103,6 +118,10 @@ height_(height)
     display_ = lv_display_create(width, height); /* 以水平和垂直分辨率（像素）进行基本初始化 */
     lv_display_set_flush_cb(display_, Lvgl_flush_cb);
     lv_display_set_user_data(display_, this);
+    const esp_lcd_panel_io_callbacks_t io_callbacks = {
+        .on_color_trans_done = OnColorTransferDone,
+    };
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &io_callbacks, this));
 	size_t lvgl_buffer_size = LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) * transfer;
 	uint8_t *lvgl_buffer1 = (uint8_t *) heap_caps_malloc(lvgl_buffer_size, MALLOC_CAP_SPIRAM);
     assert(lvgl_buffer1);
@@ -130,47 +149,6 @@ void CustomLcdDisplay::SetPowerSaveMode(bool on) {
     // transfer started by the flush callback.
     DisplayLockGuard lock(this);
     RLCD_SendCommand(on ? 0x39 : 0x38);  // LPM ON : HPM ON
-}
-
-void CustomLcdDisplay::InitPortraitLUT() {
-    uint16_t W4 = width_ >> 2;
-    for (uint16_t y = 0; y < height_; y++)
-    {
-        uint16_t byte_y = y >> 1;
-        uint8_t  local_y = y & 1;
-        for (uint16_t x = 0; x < width_; x++)
-        {
-            uint16_t byte_x = x >> 2;
-            uint8_t  local_x = x & 3;
-
-            uint32_t index = byte_y * W4 + byte_x;
-            uint8_t bit = 7 - ((local_x << 1) | local_y);
-
-            PixelIndexLUT[x][y] = index;
-            PixelBitLUT  [x][y] = (1 << bit);
-        }
-    }
-}
-
-void CustomLcdDisplay::InitLandscapeLUT() {
-    uint16_t H4 = height_ >> 2;
-    for (uint16_t y = 0; y < height_; y++)
-    {
-        uint16_t inv_y = height_ - 1 - y;
-        uint16_t block_y = inv_y >> 2;
-        uint8_t  local_y  = inv_y & 3;
-        for (uint16_t x = 0; x < width_; x++)
-        {
-            uint16_t byte_x = x >> 1;
-            uint8_t  local_x = x & 1;
-
-            uint32_t index = byte_x * H4 + block_y;
-            uint8_t bit = 7 - ((local_y << 1) | local_x);
-
-            PixelIndexLUT[x][y] = index;
-            PixelBitLUT  [x][y] = (1 << bit);
-        }
-    }
 }
 
 void CustomLcdDisplay::Set_ResetIOLevel(uint8_t level) {
@@ -320,15 +298,13 @@ void CustomLcdDisplay::RLCD_Init() {
 }
 
 void CustomLcdDisplay::RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color) {
-    uint32_t idx = PixelIndexLUT[x][y];
-    uint8_t  mask = PixelBitLUT[x][y];
-
-    uint8_t *p = &DispBuffer[idx];
-
+    uint32_t idx;
+    uint8_t mask;
+    RlcdPixelPosition(landscape_, width_, height_, x, y, idx, mask);
     if (color)
-        *p |= mask;
+        DispBuffer[idx] |= mask;
     else
-        *p &= ~mask;
+        DispBuffer[idx] &= ~mask;
 }
 
 void CustomLcdDisplay::RLCD_Display() {

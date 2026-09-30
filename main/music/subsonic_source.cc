@@ -92,8 +92,51 @@ bool SubsonicSource::Ping(std::string& error) {
     return root && GetResponse(root.get(), error) != nullptr;
 }
 
-bool SubsonicSource::Search(const std::string& query, int limit, std::vector<MusicTrack>& tracks,
-                            std::string& error) {
+bool SubsonicSource::ParseSong(const cJSON* song, MusicTrack& track) const {
+    track.id = JsonString(song, "id");
+    track.title = JsonString(song, "title");
+    if (track.id.empty() || track.title.empty()) {
+        return false;
+    }
+    track.artist = JsonString(song, "artist");
+    track.album = JsonString(song, "album");
+    track.provider = "subsonic";
+    const cJSON* duration = cJSON_GetObjectItem(song, "duration");
+    if (cJSON_IsNumber(duration) && duration->valuedouble > 0) {
+        track.duration_ms = static_cast<uint32_t>(duration->valuedouble * 1000);
+    }
+    track.stream_url = StreamUrl(track.id);
+    return true;
+}
+
+std::string SubsonicSource::StreamUrl(const std::string& id) const {
+    std::vector<std::pair<std::string, std::string>> stream_params = {{"id", id}};
+    if (max_bitrate_kbps_ > 0) {
+        // Ask the server to transcode everything to MP3, which every
+        // supported device can decode with little memory.
+        stream_params.push_back({"format", "mp3"});
+        stream_params.push_back({"maxBitRate", std::to_string(max_bitrate_kbps_)});
+    }
+    return ApiUrl("stream.view", stream_params);
+}
+
+MusicTrack SubsonicSource::BuildTrack(const std::string& id, const std::string& title,
+                                      const std::string& artist, bool) const {
+    MusicTrack track;
+    track.id = id;
+    track.title = title;
+    track.artist = artist;
+    track.provider = "subsonic";
+    track.stream_url = StreamUrl(id);
+    return track;
+}
+
+bool SubsonicSource::Search(const std::string& query, const std::string& provider, int limit,
+                            std::vector<MusicTrack>& tracks, std::string& error) {
+    if (!provider.empty() && provider != "subsonic") {
+        error = "this music source only has the catalog subsonic";
+        return false;
+    }
     limit = std::clamp(limit, 1, 50);
     std::string body;
     const bool random = query.empty();
@@ -125,26 +168,9 @@ bool SubsonicSource::Search(const std::string& query, int limit, std::vector<Mus
     const cJSON* song = nullptr;
     cJSON_ArrayForEach (song, songs) {
         MusicTrack track;
-        track.id = JsonString(song, "id");
-        track.title = JsonString(song, "title");
-        if (track.id.empty() || track.title.empty()) {
-            continue;
+        if (ParseSong(song, track)) {
+            tracks.push_back(std::move(track));
         }
-        track.artist = JsonString(song, "artist");
-        track.album = JsonString(song, "album");
-        const cJSON* duration = cJSON_GetObjectItem(song, "duration");
-        if (cJSON_IsNumber(duration) && duration->valuedouble > 0) {
-            track.duration_ms = static_cast<uint32_t>(duration->valuedouble * 1000);
-        }
-        std::vector<std::pair<std::string, std::string>> stream_params = {{"id", track.id}};
-        if (max_bitrate_kbps_ > 0) {
-            // Ask the server to transcode everything to MP3, which every
-            // supported device can decode with little memory.
-            stream_params.push_back({"format", "mp3"});
-            stream_params.push_back({"maxBitRate", std::to_string(max_bitrate_kbps_)});
-        }
-        track.stream_url = ApiUrl("stream.view", stream_params);
-        tracks.push_back(std::move(track));
         if (static_cast<int>(tracks.size()) >= limit) {
             break;
         }

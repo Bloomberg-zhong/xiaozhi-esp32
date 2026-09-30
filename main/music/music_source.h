@@ -19,6 +19,8 @@ struct MusicTrack {
     std::string stream_url;
     std::string lyric_url;   // Optional plain-text LRC URL
     std::string lyric_text;  // Optional inline LRC
+    std::string provider;    // Which catalog of the server it came from
+    bool live = false;       // Endless stream such as a radio station
 };
 
 // A catalog the player can search and stream from. Implementations perform
@@ -30,9 +32,15 @@ public:
     virtual const char* type() const = 0;
     virtual const std::string& base_url() const = 0;
 
-    // An empty query asks for random or recommended songs.
-    virtual bool Search(const std::string& query, int limit, std::vector<MusicTrack>& tracks,
-                        std::string& error) = 0;
+    // An empty query asks for random or recommended songs. `provider` limits the
+    // search to one catalog of a multi-catalog server; empty searches them all.
+    virtual bool Search(const std::string& query, const std::string& provider, int limit,
+                        std::vector<MusicTrack>& tracks, std::string& error) = 0;
+
+    // Rebuilds a playable track from the id of an earlier search result, without
+    // network access (used by favorites).
+    virtual MusicTrack BuildTrack(const std::string& id, const std::string& title,
+                                  const std::string& artist, bool live) const = 0;
 
     // Checks connectivity and credentials.
     virtual bool Ping(std::string& error) = 0;

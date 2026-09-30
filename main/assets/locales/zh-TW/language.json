@@ -61,6 +61,10 @@
         "POMODORO_MINUTES_LEFT": " 分鐘",
         "POMODORO_FOCUS_DONE": "專注結束，休息一下吧",
         "POMODORO_BREAK_DONE": "休息結束",
-        "POMODORO_DONE": "番茄鐘完成"
+        "POMODORO_DONE": "番茄鐘完成",
+        "MUSIC_MODE_SEQUENCE": "順序播放",
+        "MUSIC_MODE_REPEAT_ALL": "列表循環",
+        "MUSIC_MODE_REPEAT_ONE": "單曲循環",
+        "MUSIC_MODE_SHUFFLE": "隨機播放"
     }
 }

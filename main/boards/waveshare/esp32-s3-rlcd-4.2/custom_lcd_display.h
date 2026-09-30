@@ -2,6 +2,9 @@
 #define __CUSTOM_LCD_DISPLAY_H__
 
 #include <driver/gpio.h>
+
+#include <atomic>
+
 #include "lcd_display.h"
 
 enum ColorSelection {
@@ -32,16 +35,18 @@ private:
     int                 height_;
     uint8_t            *DispBuffer = NULL;
     int                 DisplayLen;
-	uint16_t (*PixelIndexLUT)[300];
-	uint8_t  (*PixelBitLUT  )[300];
-	void InitPortraitLUT();
-	void InitLandscapeLUT();
+    bool landscape_ = true;
+    // True from the moment a frame is handed to the SPI DMA until its
+    // completion interrupt, which is what releases LVGL.
+    std::atomic<bool> flush_in_flight_{false};
     void Set_ResetIOLevel(uint8_t level);
     void RLCD_SendCommand(uint8_t Reg);
     void RLCD_SendData(uint8_t Data);
     void RLCD_Sendbuffera(uint8_t *Data, int len);
     void RLCD_Reset(void);
     static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
+    static bool OnColorTransferDone(esp_lcd_panel_io_handle_t panel_io,
+                                    esp_lcd_panel_io_event_data_t* event_data, void* user_ctx);
 
 public:
     CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,

@@ -10,6 +10,10 @@ void LoadMusicSettings(MusicPlayer& player);
 // Voice-facing tools used by the assistant: self.music.*
 void AddMusicTools(McpServer& server);
 
+// Advances the play mode (sequence, repeat all, repeat one, shuffle), saves it and
+// shows its name. Used by the KEY button.
+void CycleMusicPlayMode();
+
 // Console-only tools for configuring the music source.
 void AddMusicUserOnlyTools(McpServer& server);
 

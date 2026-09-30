@@ -6,7 +6,10 @@
 #include <memory>
 
 #include "application.h"
+#include "assets/lang_config.h"
 #include "board.h"
+#include "display.h"
+#include "favorites.h"
 #include "local_music.h"
 #include "mcp_server.h"
 #include "music_player.h"
@@ -18,7 +21,10 @@
 namespace {
 
 constexpr int kSearchLimit = 20;
+constexpr size_t kMaxLocalQueue = 200;
+constexpr size_t kMaxListed = 30;
 constexpr const char* kSettingsNamespace = "music";
+constexpr const char* kFavoritesKey = "favs";
 
 cJSON* MakeResult(bool success, const std::string& message) {
     cJSON* result = cJSON_CreateObject();
@@ -33,8 +39,128 @@ cJSON* MakeTrackJson(const MusicTrack& track) {
     cJSON* item = cJSON_CreateObject();
     cJSON_AddStringToObject(item, "title", track.title.c_str());
     cJSON_AddStringToObject(item, "artist", track.artist.c_str());
-    cJSON_AddStringToObject(item, "album", track.album.c_str());
+    if (!track.album.empty()) {
+        cJSON_AddStringToObject(item, "album", track.album.c_str());
+    }
+    if (!track.provider.empty()) {
+        cJSON_AddStringToObject(item, "source", track.provider.c_str());
+    }
+    if (track.live) {
+        cJSON_AddBoolToObject(item, "live", true);
+    }
     return item;
+}
+
+const char* ModeText(MusicPlayMode mode) {
+    switch (mode) {
+        case MusicPlayMode::kRepeatAll:
+            return Lang::Strings::MUSIC_MODE_REPEAT_ALL;
+        case MusicPlayMode::kRepeatOne:
+            return Lang::Strings::MUSIC_MODE_REPEAT_ONE;
+        case MusicPlayMode::kShuffle:
+            return Lang::Strings::MUSIC_MODE_SHUFFLE;
+        default:
+            return Lang::Strings::MUSIC_MODE_SEQUENCE;
+    }
+}
+
+// Applies and saves a play mode, and shows its name on the display.
+void ApplyPlayMode(MusicPlayMode mode) {
+    Application::GetInstance().GetMusicPlayer().SetPlayMode(mode);
+    {
+        Settings settings(kSettingsNamespace, true);
+        settings.SetString("mode", MusicPlayModeName(mode));
+    }
+    Application::GetInstance().Schedule(
+        [mode]() { Board::GetInstance().GetDisplay()->ShowNotification(ModeText(mode), 2500); });
+}
+
+FavoriteList LoadFavorites() {
+    Settings settings(kSettingsNamespace, false);
+    return FavoriteList::Parse(settings.GetString(kFavoritesKey));
+}
+
+void SaveFavorites(const FavoriteList& list) {
+    Settings settings(kSettingsNamespace, true);
+    settings.SetString(kFavoritesKey, list.Serialize());
+}
+
+FavoriteEntry ToFavorite(const MusicTrack& track) {
+    FavoriteEntry entry;
+    entry.title = track.title;
+    entry.artist = track.artist;
+    if (IsLocalMusicPath(track.stream_url)) {
+        entry.kind = 'l';
+        entry.id = track.stream_url;
+    } else {
+        entry.kind = track.live ? 'r' : 's';
+        entry.id = track.id;
+    }
+    return entry;
+}
+
+MusicTrack LocalTrackFromPath(const FavoriteEntry& entry) {
+    MusicTrack track;
+    track.id = entry.id;
+    track.title = entry.title;
+    track.artist = entry.artist;
+    track.stream_url = entry.id;
+    size_t dot = entry.id.rfind('.');
+    if (dot != std::string::npos) {
+        track.lyric_url = entry.id.substr(0, dot) + ".lrc";  // Missing files are ignored
+    }
+    return track;
+}
+
+// Finds songs on the SD card, or online when `source` names a catalog (or is
+// empty and a music source is configured).
+struct SearchOutcome {
+    std::vector<MusicTrack> tracks;
+    std::string error;
+    bool ok = false;
+};
+
+SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const std::string& source,
+                          int limit) {
+    SearchOutcome outcome;
+    auto online = player.GetSource();
+    const bool want_local = source == "sdcard" || source == "local" || (source.empty() && !online);
+    if (want_local) {
+        const std::string root = player.GetLocalRoot();
+        if (root.empty()) {
+            outcome.error =
+                online ? "No SD card with music is available"
+                       : "No music source is configured and there is no SD card with music. The "
+                         "user can set up a music server with self.music.configure_source in the "
+                         "device console.";
+            return outcome;
+        }
+        LocalMusicScanOptions options;
+        options.excluded_folders.push_back(kWhiteNoiseFolder);
+        outcome.tracks = FilterLocalMusic(ScanLocalMusic(root, options), query);
+        if (outcome.tracks.size() > static_cast<size_t>(limit)) {
+            outcome.tracks.resize(limit);
+        }
+        outcome.ok = !outcome.tracks.empty();
+        if (!outcome.ok) {
+            outcome.error = "No matching music files on the SD card";
+        }
+        return outcome;
+    }
+    if (!online) {
+        outcome.error = "No online music source is configured";
+        return outcome;
+    }
+    outcome.ok = online->Search(query, source, limit, outcome.tracks, outcome.error);
+    return outcome;
+}
+
+bool ParseModeArgument(const std::string& name, MusicPlayMode& mode, std::string& error) {
+    if (!ParseMusicPlayMode(name, mode)) {
+        error = "Unknown mode: " + name + ". Use sequence, repeat_all, repeat_one or shuffle.";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -51,84 +177,71 @@ void LoadMusicSettings(MusicPlayer& player) {
     }
 }
 
+void CycleMusicPlayMode() {
+    auto& player = Application::GetInstance().GetMusicPlayer();
+    constexpr MusicPlayMode kOrder[] = {MusicPlayMode::kSequence, MusicPlayMode::kRepeatAll,
+                                        MusicPlayMode::kRepeatOne, MusicPlayMode::kShuffle};
+    MusicPlayMode current = player.GetPlayMode();
+    size_t index = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        if (kOrder[i] == current) {
+            index = i;
+        }
+    }
+    ApplyPlayMode(kOrder[(index + 1) % 4]);
+}
+
 void AddMusicTools(McpServer& server) {
     auto play = std::make_unique<McpTool>(
         "self.music.play",
-        "Search the user's music library and play the songs found. Use it whenever the user asks "
-        "to play music, a song, a singer or an album (for example \"播放周杰伦的稻香\" or "
-        "\"来点音乐\").\n"
+        "Play music. Use it whenever the user asks for a song, singer, album, radio or just "
+        "\"some music\". Playback starts right after your reply, so keep the reply short, for "
+        "example \"好的，为你播放稻香\".\n"
         "Args:\n"
-        "  `query`: Song title and/or artist keywords, e.g. \"稻香 周杰伦\". Use an empty string "
-        "for random songs.\n"
-        "Return:\n"
-        "  The first song and the queue length. Playback starts right after your reply, so keep "
-        "the reply short (e.g. \"好的，为你播放稻香\").",
-        PropertyList({Property("query", kPropertyTypeString, std::string(""))}),
+        "  `query`: Title, artist or station keywords, e.g. \"稻香 周杰伦\". Empty for random "
+        "songs.\n"
+        "  `source`: Where to look: empty for the default, `sdcard` for files on the SD card, "
+        "`radio` for live radio stations, `jamendo` or `archive` for free online music, or "
+        "another catalog of the music server.\n"
+        "  `mode`: Optional play mode: `sequence`, `repeat_all` (repeat the list), `repeat_one` "
+        "(repeat one song) or `shuffle`. Empty keeps the current mode.",
+        PropertyList({Property("query", kPropertyTypeString, std::string("")),
+                      Property("source", kPropertyTypeString, std::string("")),
+                      Property("mode", kPropertyTypeString, std::string(""))}),
         [](const PropertyList& properties) -> ReturnValue {
             auto& app = Application::GetInstance();
             auto& player = app.GetMusicPlayer();
-            auto source = player.GetSource();
-            if (!source) {
-                return MakeResult(false,
-                                  "No music source is configured. The user must configure one in "
-                                  "the device console (self.music.configure_source).");
-            }
-            std::vector<MusicTrack> tracks;
+            MusicPlayMode mode = player.GetPlayMode();
+            const std::string mode_name = properties["mode"].value<std::string>();
             std::string error;
-            if (!source->Search(properties["query"].value<std::string>(), kSearchLimit, tracks,
-                                error)) {
+            if (!mode_name.empty() && !ParseModeArgument(mode_name, mode, error)) {
                 return MakeResult(false, error);
             }
+            const std::string source = properties["source"].value<std::string>();
+            auto found =
+                SearchMusic(player, properties["query"].value<std::string>(), source, kSearchLimit);
+            if (!found.ok) {
+                return MakeResult(false, found.error);
+            }
             cJSON* result = MakeResult(true, "");
-            cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(tracks.front()));
-            cJSON_AddNumberToObject(result, "queue_length", tracks.size());
-            player.SetQueue(std::move(tracks), 0);
+            cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(found.tracks.front()));
+            cJSON_AddNumberToObject(result, "queue_length", found.tracks.size());
+            const bool local = IsLocalMusicPath(found.tracks.front().stream_url);
+            player.SetQueue(std::move(found.tracks), 0, false, local ? "local" : "online");
+            if (!mode_name.empty()) {
+                ApplyPlayMode(mode);
+            }
             app.PlayMusic(true);
             return result;
         });
     play->set_async(true);
     server.AddTool(std::move(play));
 
-    auto play_local = std::make_unique<McpTool>(
-        "self.music.play_local",
-        "Play music stored on the device's SD card (for example children's songs). Use it when "
-        "the user asks for local, offline or SD card music, or when no online music source is "
-        "configured.\n"
-        "Args:\n"
-        "  `query`: Keywords matched against file names, folders, titles and artists, e.g. "
-        "\"儿歌\". Empty plays everything.\n"
-        "Return:\n"
-        "  The first song and the number of songs found.",
-        PropertyList({Property("query", kPropertyTypeString, std::string(""))}),
-        [](const PropertyList& properties) -> ReturnValue {
-            auto& app = Application::GetInstance();
-            auto& player = app.GetMusicPlayer();
-            const std::string root = player.GetLocalRoot();
-            if (root.empty()) {
-                return MakeResult(false, "No SD card with music is available");
-            }
-            LocalMusicScanOptions options;
-            options.excluded_folders.push_back(kWhiteNoiseFolder);
-            auto tracks = FilterLocalMusic(ScanLocalMusic(root, options),
-                                           properties["query"].value<std::string>());
-            if (tracks.empty()) {
-                return MakeResult(false, "No matching music files on the SD card");
-            }
-            cJSON* result = MakeResult(true, "");
-            cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(tracks.front()));
-            cJSON_AddNumberToObject(result, "queue_length", tracks.size());
-            player.SetQueue(std::move(tracks), 0, false, "local");
-            app.PlayMusic(true);
-            return result;
-        });
-    play_local->set_async(true);
-    server.AddTool(std::move(play_local));
-
     server.AddTool(
         "self.music.control",
-        "Control music playback.\n"
+        "Control the current music.\n"
         "Args:\n"
-        "  `action`: `pause` (keep the position), `resume`, `next`, `previous` or `stop`.",
+        "  `action`: `pause` (keeps the position), `resume`, `next`, `previous` or `stop`.",
         PropertyList({Property("action", kPropertyTypeString)}),
         [](const PropertyList& properties) -> ReturnValue {
             auto& app = Application::GetInstance();
@@ -155,26 +268,199 @@ void AddMusicTools(McpServer& server) {
 
     server.AddTool(
         "self.music.set_play_mode",
-        "Set how the music queue continues.\n"
-        "Args:\n"
-        "  `mode`: `sequence` (stop at the end), `repeat_all`, `repeat_one` or `shuffle`.",
+        "Set how the music continues: `sequence` (stop after the last song), `repeat_all` "
+        "(列表循环), `repeat_one` (单曲循环) or `shuffle` (随机播放).",
         PropertyList({Property("mode", kPropertyTypeString)}),
         [](const PropertyList& properties) -> ReturnValue {
             MusicPlayMode mode;
-            const std::string name = properties["mode"].value<std::string>();
-            if (!ParseMusicPlayMode(name, mode)) {
-                return MakeResult(false, "Unknown mode: " + name);
+            std::string error;
+            if (!ParseModeArgument(properties["mode"].value<std::string>(), mode, error)) {
+                return MakeResult(false, error);
             }
-            Application::GetInstance().GetMusicPlayer().SetPlayMode(mode);
-            Settings settings(kSettingsNamespace, true);
-            settings.SetString("mode", name);
+            ApplyPlayMode(mode);
             return MakeResult(true, "");
         });
 
+    auto queue = std::make_unique<McpTool>(
+        "self.music.queue",
+        "Show or edit the playlist (queue) of the current music. Positions start at 1.\n"
+        "Args:\n"
+        "  `action`: `list`, `play` (jump to a position), `add` (append songs), `add_next` "
+        "(play after the current song), `remove` or `clear`.\n"
+        "  `index`: Position for `play` and `remove`.\n"
+        "  `query`, `source`, `count`: What to search for `add` and `add_next`, like "
+        "self.music.play, and how many songs to add (1-10).",
+        PropertyList({Property("action", kPropertyTypeString),
+                      Property("index", kPropertyTypeInteger, 0, 0, 200),
+                      Property("query", kPropertyTypeString, std::string("")),
+                      Property("source", kPropertyTypeString, std::string("")),
+                      Property("count", kPropertyTypeInteger, 1, 1, 10)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            auto& player = app.GetMusicPlayer();
+            const std::string action = properties["action"].value<std::string>();
+            const int index = properties["index"].value<int>();
+
+            std::vector<MusicTrack> tracks;
+            size_t current = 0;
+            player.GetQueue(tracks, current);
+
+            if (action == "list") {
+                cJSON* result = MakeResult(true, "");
+                cJSON_AddNumberToObject(result, "total", tracks.size());
+                cJSON_AddNumberToObject(result, "current", tracks.empty() ? 0 : current + 1);
+                cJSON_AddStringToObject(result, "play_mode",
+                                        MusicPlayModeName(player.GetPlayMode()));
+                cJSON* list = cJSON_CreateArray();
+                // Show the songs around the current one when the list is long.
+                size_t first = current >= 5 && tracks.size() > kMaxListed ? current - 5 : 0;
+                for (size_t i = first; i < tracks.size() && i < first + kMaxListed; ++i) {
+                    cJSON* item = MakeTrackJson(tracks[i]);
+                    cJSON_AddNumberToObject(item, "index", i + 1);
+                    cJSON_AddItemToArray(list, item);
+                }
+                cJSON_AddItemToObject(result, "songs", list);
+                return result;
+            }
+            if (action == "play") {
+                if (index < 1 || !player.SelectIndex(index - 1)) {
+                    return MakeResult(false, "There is no song at that position");
+                }
+                app.PlayMusic(true);
+                return MakeResult(true, "");
+            }
+            if (action == "remove") {
+                if (index < 1 || !player.RemoveFromQueue(index - 1)) {
+                    return MakeResult(false, "There is no song at that position");
+                }
+                if (static_cast<size_t>(index - 1) == current && player.WantsPlayback()) {
+                    if (player.HasTrack()) {
+                        app.PlayMusic(true);  // The next song took the place
+                    } else {
+                        app.StopMusic();
+                    }
+                }
+                return MakeResult(true, "");
+            }
+            if (action == "clear") {
+                app.StopMusic();
+                player.ClearQueue();
+                return MakeResult(true, "");
+            }
+            if (action == "add" || action == "add_next") {
+                const int count = properties["count"].value<int>();
+                auto found = SearchMusic(player, properties["query"].value<std::string>(),
+                                         properties["source"].value<std::string>(), count);
+                if (!found.ok) {
+                    return MakeResult(false, found.error);
+                }
+                const bool was_empty = tracks.empty();
+                const size_t added =
+                    player.AddToQueue(std::move(found.tracks), action == "add_next");
+                if (added == 0) {
+                    return MakeResult(false, "The playlist is full");
+                }
+                if (was_empty) {
+                    player.SelectIndex(0);
+                    app.PlayMusic(true);
+                }
+                cJSON* result = MakeResult(true, "");
+                cJSON_AddNumberToObject(result, "added", added);
+                return result;
+            }
+            return MakeResult(false, "Unknown action: " + action);
+        });
+    queue->set_async(true);
+    server.AddTool(std::move(queue));
+
+    auto favorites = std::make_unique<McpTool>(
+        "self.music.favorites",
+        "The user's favorite songs (收藏). Positions start at 1.\n"
+        "Args:\n"
+        "  `action`: `list`, `add` (the current song), `remove` or `play` (the whole list, "
+        "starting at `index`, or at the first song when `index` is 0).\n"
+        "  `index`: Position for `remove` and `play`.",
+        PropertyList({Property("action", kPropertyTypeString),
+                      Property("index", kPropertyTypeInteger, 0, 0, 100)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            auto& player = app.GetMusicPlayer();
+            const std::string action = properties["action"].value<std::string>();
+            const int index = properties["index"].value<int>();
+            FavoriteList list = LoadFavorites();
+
+            if (action == "list") {
+                cJSON* result = MakeResult(true, "");
+                cJSON* songs = cJSON_CreateArray();
+                for (size_t i = 0; i < list.size(); ++i) {
+                    const auto& entry = list.items()[i];
+                    cJSON* item = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(item, "index", i + 1);
+                    cJSON_AddStringToObject(item, "title", entry.title.c_str());
+                    cJSON_AddStringToObject(item, "artist", entry.artist.c_str());
+                    cJSON_AddItemToArray(songs, item);
+                }
+                cJSON_AddItemToObject(result, "songs", songs);
+                return result;
+            }
+            if (action == "add") {
+                MusicTrack track;
+                if (!player.GetCurrentTrack(track)) {
+                    return MakeResult(false, "Nothing is playing");
+                }
+                if (!list.Add(ToFavorite(track))) {
+                    return MakeResult(false, "This song cannot be saved as a favorite");
+                }
+                SaveFavorites(list);
+                return MakeResult(true, "");
+            }
+            if (action == "remove") {
+                if (index < 1 || !list.Remove(index - 1)) {
+                    return MakeResult(false, "There is no favorite at that position");
+                }
+                SaveFavorites(list);
+                return MakeResult(true, "");
+            }
+            if (action == "play") {
+                if (list.size() == 0) {
+                    return MakeResult(false, "There are no favorite songs yet");
+                }
+                auto online = player.GetSource();
+                std::vector<MusicTrack> tracks;
+                size_t start = 0;
+                for (size_t i = 0; i < list.size(); ++i) {
+                    const auto& entry = list.items()[i];
+                    if (entry.kind == 'l') {
+                        tracks.push_back(LocalTrackFromPath(entry));
+                    } else if (online) {
+                        tracks.push_back(online->BuildTrack(entry.id, entry.title, entry.artist,
+                                                            entry.kind == 'r'));
+                    } else {
+                        continue;  // Needs a music source that is not configured
+                    }
+                    if (index >= 1 && i == static_cast<size_t>(index - 1)) {
+                        start = tracks.size() - 1;
+                    }
+                }
+                if (tracks.empty()) {
+                    return MakeResult(false,
+                                      "The favorites need a music source that is not set up");
+                }
+                cJSON* result = MakeResult(true, "");
+                cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(tracks[start]));
+                cJSON_AddNumberToObject(result, "queue_length", tracks.size());
+                player.SetQueue(std::move(tracks), start, false, "favorites");
+                app.PlayMusic(true);
+                return result;
+            }
+            return MakeResult(false, "Unknown action: " + action);
+        });
+    server.AddTool(std::move(favorites));
+
     server.AddTool(
         "self.music.get_status",
-        "Get the music player status: state, current song, position, play mode and queue. Use it "
-        "to answer questions such as \"这是什么歌\".",
+        "Get the music player status: state, current song, position, play mode and playlist "
+        "size. Use it to answer questions such as \"这是什么歌\".",
         PropertyList(), [](const PropertyList&) -> ReturnValue {
             return Application::GetInstance().GetMusicPlayer().GetStatusJson();
         });

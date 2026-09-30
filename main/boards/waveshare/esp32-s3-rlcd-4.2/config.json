@@ -12,6 +12,8 @@
                 "CONFIG_PM_ENABLE=y",
                 "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
                 "CONFIG_USE_POMODORO=y",
+                "CONFIG_MUSIC_SERVER_URL=\"\"",
+                "CONFIG_MUSIC_SERVER_API_KEY=\"\"",
                 "CONFIG_FATFS_LFN_HEAP=y",
                 "CONFIG_FATFS_API_ENCODING_UTF_8=y"
             ]

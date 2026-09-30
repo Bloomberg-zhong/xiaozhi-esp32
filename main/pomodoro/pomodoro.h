@@ -32,6 +32,7 @@ public:
     void TogglePause();
 
     bool IsActive() const;
+    bool IsPaused() const;
     // Caller owns the returned object.
     cJSON* GetStatusJson() const;
 

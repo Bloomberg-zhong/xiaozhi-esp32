@@ -3,7 +3,10 @@
 #include <esp_log.h>
 #include <esp_random.h>
 
+#include <cJSON.h>
+
 #include <array>
+#include <memory>
 
 #include "board.h"
 #include "http_api_source.h"
@@ -77,8 +80,22 @@ bool MusicHttpGet(const std::string& url, size_t max_bytes, std::string& body, s
             continue;
         }
         if (status < 200 || status >= 300) {
-            http->Close();
             error = "music server returned HTTP " + std::to_string(status);
+            // Servers explain failures as {"error": "..."}; pass that on so the
+            // assistant can react (for example to an unknown source name).
+            std::array<char, 384> detail;
+            auto read = http->Read(detail.data(), detail.size() - 1);
+            if (read && *read > 0) {
+                detail[*read] = '\0';
+                std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(detail.data()),
+                                                                     cJSON_Delete);
+                const cJSON* message = json ? cJSON_GetObjectItem(json.get(), "error") : nullptr;
+                if (cJSON_IsString(message)) {
+                    error += ": ";
+                    error += message->valuestring;
+                }
+            }
+            http->Close();
             return false;
         }
 
@@ -123,7 +140,16 @@ MusicSourceConfig MusicSourceConfig::Load() {
         return config;
     }
 
-    // Nothing stored yet: use the defaults from menuconfig.
+    // Nothing stored yet: use the defaults from menuconfig. The music server
+    // (docs/music-player.md) takes precedence over a direct Subsonic account.
+#if defined(CONFIG_MUSIC_SERVER_URL)
+    if (std::string(CONFIG_MUSIC_SERVER_URL) != "") {
+        config.type = "http";
+        config.url = CONFIG_MUSIC_SERVER_URL;
+        config.api_key = CONFIG_MUSIC_SERVER_API_KEY;
+        return config;
+    }
+#endif
 #if defined(CONFIG_MUSIC_SOURCE_DEFAULT_SUBSONIC)
     config.type = "subsonic";
     config.url = CONFIG_MUSIC_SOURCE_DEFAULT_URL;
@@ -135,10 +161,6 @@ MusicSourceConfig MusicSourceConfig::Load() {
         config.salt = HexEncode(salt.data(), salt.size());
         config.token = SubsonicSource::MakeToken(password, config.salt);
     }
-#elif defined(CONFIG_MUSIC_SOURCE_DEFAULT_HTTP_API)
-    config.type = "http";
-    config.url = CONFIG_MUSIC_SOURCE_DEFAULT_URL;
-    config.api_key = CONFIG_MUSIC_SOURCE_DEFAULT_API_KEY;
 #endif
     return config;
 }

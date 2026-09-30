@@ -161,6 +161,57 @@ void MusicPlayer::SetQueue(std::vector<MusicTrack> tracks, size_t start_index, b
     queue_tag_ = std::move(tag);
 }
 
+void MusicPlayer::GetQueue(std::vector<MusicTrack>& tracks, size_t& index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tracks = queue_;
+    index = index_;
+}
+
+bool MusicPlayer::SelectIndex(size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index >= queue_.size()) {
+        return false;
+    }
+    index_ = index;
+    return true;
+}
+
+size_t MusicPlayer::AddToQueue(std::vector<MusicTrack> tracks, bool after_current) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    constexpr size_t kMaxQueue = 100;
+    size_t added = 0;
+    size_t position = after_current && !queue_.empty() ? index_ + 1 : queue_.size();
+    for (auto& track : tracks) {
+        if (queue_.size() >= kMaxQueue) {
+            break;
+        }
+        queue_.insert(queue_.begin() + position + added, std::move(track));
+        ++added;
+    }
+    return added;
+}
+
+bool MusicPlayer::RemoveFromQueue(size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index >= queue_.size()) {
+        return false;
+    }
+    queue_.erase(queue_.begin() + index);
+    if (index < index_) {
+        --index_;
+    } else if (index == index_ && index_ >= queue_.size()) {
+        index_ = 0;
+    }
+    return true;
+}
+
+void MusicPlayer::ClearQueue() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.clear();
+    index_ = 0;
+    queue_tag_.clear();
+}
+
 std::string MusicPlayer::queue_tag() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return queue_tag_;
@@ -278,12 +329,20 @@ uint32_t MusicPlayer::Play() {
 }
 
 void MusicPlayer::Pause() {
+    bool live;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!session_ || session_->paused) {
             return;
         }
-        session_->paused = true;
+        live = session_->track.live;
+        session_->paused = !live;
+    }
+    if (live) {
+        // A paused live stream would resume with seconds of stale audio, so drop
+        // the session; Play() reopens the stream at the live position.
+        Stop();
+        return;
     }
     // Drop the few frames already queued so the pause is immediate.
     audio_service_.ResetDecoder();
@@ -407,6 +466,12 @@ cJSON* MusicPlayer::GetStatusJson() const {
         cJSON_AddStringToObject(item, "title", track.title.c_str());
         cJSON_AddStringToObject(item, "artist", track.artist.c_str());
         cJSON_AddStringToObject(item, "album", track.album.c_str());
+        if (!track.provider.empty()) {
+            cJSON_AddStringToObject(item, "source", track.provider.c_str());
+        }
+        if (track.live) {
+            cJSON_AddBoolToObject(item, "live", true);
+        }
         if (track.duration_ms > 0) {
             cJSON_AddNumberToObject(item, "duration_s", track.duration_ms / 1000);
         }
@@ -612,9 +677,12 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
     int failures = 0;
     bool lyrics_loaded = false;
     bool finished = false;
+    // A live stream has no end and cannot be resumed at an offset: a dropped
+    // connection is simply reopened.
+    const bool live = session->track.live;
 
     while (!session->cancelled && !finished) {
-        auto http = OpenStream(*session, received, total);
+        auto http = OpenStream(*session, live ? 0 : received, total);
         if (http) {
             while (!session->cancelled) {
                 auto read = http->Read(chunk.data(), chunk.size());
@@ -624,7 +692,7 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
                 }
                 if (size == 0) {
                     // A close before Content-Length is reached is a dropped connection.
-                    finished = total == 0 || received >= total;
+                    finished = !live && (total == 0 || received >= total);
                     break;
                 }
                 failures = 0;
@@ -632,7 +700,7 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
                     break;
                 }
                 received += size;
-                if (!lyrics_loaded && received >= kLyricsAfterBytes) {
+                if (!lyrics_loaded && !live && received >= kLyricsAfterBytes) {
                     // Playback has started by now; the lyric request runs
                     // while the stream buffer keeps the audio going.
                     lyrics_loaded = true;
@@ -660,7 +728,7 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
         vTaskDelay(pdMS_TO_TICKS(500 * failures));
     }
 
-    if (finished && !lyrics_loaded && !session->cancelled) {
+    if (finished && !lyrics_loaded && !live && !session->cancelled) {
         LoadLyrics(session);
     }
     session->net_done = true;

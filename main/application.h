@@ -159,6 +159,10 @@ private:
     MusicPlayer music_player_;
     bool pending_music_start_ = false;  // Waiting for the reply audio to drain
     int music_failures_ = 0;
+    // Ends a conversation that is still open some seconds after music was
+    // requested, for replies without speech and servers that keep listening.
+    esp_timer_handle_t music_handoff_timer_ = nullptr;
+    int music_handoff_attempts_ = 0;
 #endif
     std::unique_ptr<Ota> ota_;
 
@@ -195,6 +199,8 @@ private:
     void SuspendMusicForChat();
     void StopMusicPlayback();
     void ShowMusicTrack();
+    void ArmMusicHandoff();
+    void HandleMusicHandoffTimeout();
     void HandleMusicFinished(uint32_t session_id, bool success, const std::string& error);
 #endif
 

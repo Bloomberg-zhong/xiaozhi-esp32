@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 
+#include "favorites.h"
 #include "local_music.h"
 #include "lrc_parser.h"
 #include "music_util.h"
@@ -235,6 +236,75 @@ void TestLocalMusic() {
     std::system(("rm -rf '" + root + "'").c_str());
 }
 
+void TestFavorites() {
+    FavoriteList list;
+    EXPECT(list.Add({'s', "jamendo:1", "Song One", "Artist A"}));
+    EXPECT(list.Add({'l', "/sdcard/儿歌/小星星.mp3", "小星星", ""}));
+    EXPECT(list.Add({'s', "jamendo:2", "Song\tTwo\n", "B"}));
+    EXPECT(list.size() == 3);
+    EXPECT(list.items()[0].id == "jamendo:2");     // Newest first
+    EXPECT(list.items()[0].title == "Song Two ");  // Delimiters are removed
+
+    // Adding an existing song moves it to the front instead of duplicating it.
+    EXPECT(list.Add({'s', "jamendo:1", "Song One (remaster)", "Artist A"}));
+    EXPECT(list.size() == 3);
+    EXPECT(list.items()[0].id == "jamendo:1" && list.items()[0].title == "Song One (remaster)");
+    EXPECT(list.Contains('l', "/sdcard/儿歌/小星星.mp3"));
+    EXPECT(!list.Contains('s', "/sdcard/儿歌/小星星.mp3"));
+
+    // Invalid entries are rejected.
+    EXPECT(list.Add({'r', "radio:1", "Radio One", "CN"}));
+    EXPECT(list.Remove(0));
+    EXPECT(!list.Add({'x', "id", "t", "a"}));
+    EXPECT(!list.Add({'s', "", "t", "a"}));
+    EXPECT(!list.Add({'s', std::string(300, 'a'), "t", "a"}));
+
+    // A serialized list reads back identically.
+    FavoriteList copy = FavoriteList::Parse(list.Serialize());
+    EXPECT(copy.size() == list.size());
+    for (size_t i = 0; i < copy.size() && i < list.size(); ++i) {
+        EXPECT(copy.items()[i].kind == list.items()[i].kind);
+        EXPECT(copy.items()[i].id == list.items()[i].id);
+        EXPECT(copy.items()[i].title == list.items()[i].title);
+        EXPECT(copy.items()[i].artist == list.items()[i].artist);
+    }
+
+    EXPECT(list.Remove(1));
+    EXPECT(list.size() == 2);
+    EXPECT(!list.Remove(5));
+
+    // Garbage lines are skipped.
+    FavoriteList garbage =
+        FavoriteList::Parse("hello\n\nq\tid\tt\ta\ns\tid2\tTitle\tArtist\nsxid\t\n");
+    EXPECT(garbage.size() == 1 && garbage.items()[0].id == "id2");
+
+    // Limits: entry count, byte budget and UTF-8 safe truncation.
+    FavoriteList many;
+    for (int i = 0; i < 100; ++i) {
+        many.Add({'s', "id" + std::to_string(i), "title", "artist"});
+    }
+    EXPECT(many.size() == FavoriteList::kMaxEntries);
+    EXPECT(many.items()[0].id == "id99");
+
+    FavoriteList big;
+    for (int i = 0; i < 30; ++i) {
+        big.Add({'l', "/sdcard/" + std::string(150, 'a') + std::to_string(i), std::string(200, 'b'),
+                 std::string(200, 'c')});
+    }
+    EXPECT(big.Serialize().size() <= FavoriteList::kMaxBytes);
+    EXPECT(big.size() >= 1 && big.items()[0].id.find("29") != std::string::npos);
+
+    FavoriteList cjk;
+    cjk.Add({'s', "x", std::string(40, '\0') + "", ""});
+    std::string long_title;
+    for (int i = 0; i < 60; ++i) {
+        long_title += "歌";  // 3 bytes each
+    }
+    cjk.Add({'s', "cjk", long_title, ""});
+    const std::string& cut = cjk.items()[0].title;
+    EXPECT(cut.size() <= 90 && cut.size() % 3 == 0);  // Never ends inside a character
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +314,7 @@ int main() {
     TestUrls();
     TestDownmix();
     TestLocalMusic();
+    TestFavorites();
     if (failures != 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

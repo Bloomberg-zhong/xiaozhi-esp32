@@ -58,7 +58,12 @@ TF 卡（SDMMC 1 线：CLK=GPIO38，CMD=GPIO21，D0=GPIO39，FAT32，不会自�
 - 放在卡上的音乐可以说“播放卡里的儿歌”来播放（`self.music.play_local`）。
 - `white-noise/` 目录放白噪音，说“开始番茄钟”时在专注期间循环播放。
 
-KEY 键（GPIO18）：单击暂停/继续，双击下一首，长按停止番茄钟和音乐。
+KEY 键（GPIO18）：单击暂停/继续，双击下一首，三击切换播放模式（顺序/列表循环/单曲循环/随机），长按停止番茄钟和音乐。
+
+**音乐服务器域名**：`config.json` 的 `sdkconfig_append` 里已预留
+`CONFIG_MUSIC_SERVER_URL=""` 和 `CONFIG_MUSIC_SERVER_API_KEY=""`，填上 `https://你的域名` 和密钥后重新编译；
+也可以不重新烧录，在设备控制台调用 `self.music.configure_source(type="http", url=..., api_key=...)`。服务器
+见 `scripts/music_server/README.md`。
 
 # 省电
 

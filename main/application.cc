@@ -54,10 +54,30 @@ Application::Application()
                                                 .name = "clock_timer",
                                                 .skip_unhandled_events = true};
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+
+#if CONFIG_USE_MUSIC_PLAYER
+    esp_timer_create_args_t handoff_timer_args = {
+        .callback =
+            [](void* arg) {
+                auto* app = static_cast<Application*>(arg);
+                app->Schedule([app]() { app->HandleMusicHandoffTimeout(); });
+            },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "music_handoff",
+        .skip_unhandled_events = true};
+    esp_timer_create(&handoff_timer_args, &music_handoff_timer_);
+#endif
 }
 
 Application::~Application() {
     notify_player_.Stop();
+#if CONFIG_USE_MUSIC_PLAYER
+    if (music_handoff_timer_ != nullptr) {
+        esp_timer_stop(music_handoff_timer_);
+        esp_timer_delete(music_handoff_timer_);
+    }
+#endif
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
@@ -1266,7 +1286,45 @@ void Application::PlayMusic(bool restart) {
         music_failures_ = 0;
         music_player_.SetWantsPlayback(true);
         TryStartMusic();
+        ArmMusicHandoff();
     });
+}
+
+void Application::ArmMusicHandoff() {
+    auto state = GetDeviceState();
+    if (state != kDeviceStateConnecting && state != kDeviceStateListening &&
+        state != kDeviceStateSpeaking) {
+        return;
+    }
+    // The normal path is the end of the spoken reply (tts stop). This is the
+    // fallback when no reply comes, or the server keeps the conversation open.
+    constexpr int64_t kHandoffDelayUs = 7LL * 1000 * 1000;
+    music_handoff_attempts_ = 0;
+    esp_timer_stop(music_handoff_timer_);
+    esp_timer_start_once(music_handoff_timer_, kHandoffDelayUs);
+}
+
+void Application::HandleMusicHandoffTimeout() {
+    constexpr int kMaxSpeakingExtensions = 6;
+    if (!music_player_.WantsPlayback() || !music_player_.HasTrack()) {
+        return;
+    }
+    auto state = GetDeviceState();
+    if (state == kDeviceStateSpeaking) {
+        // A long reply is still being spoken; its end hands over to the music.
+        if (++music_handoff_attempts_ <= kMaxSpeakingExtensions) {
+            esp_timer_start_once(music_handoff_timer_, 7LL * 1000 * 1000);
+        }
+        return;
+    }
+    if (state != kDeviceStateListening && state != kDeviceStateConnecting) {
+        return;
+    }
+    ESP_LOGI(TAG, "Ending the conversation to start the music");
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::PauseMusic() {

@@ -16,8 +16,12 @@
 #if CONFIG_USE_POMODORO
 #include "pomodoro/pomodoro.h"
 #endif
+#if CONFIG_USE_MUSIC_PLAYER
+#include "music/music_tools.h"
+#endif
 
 #include <driver/sdmmc_host.h>
+#include <esp_timer.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 
@@ -25,7 +29,7 @@
 
 // Idle time before power saving: wake word, microphone and the CPU go to
 // light sleep, and the panel switches to low power mode. Press BOOT to wake.
-#define POWER_SAVE_IDLE_SECONDS 180
+#define POWER_SAVE_IDLE_SECONDS 180  // Default; overridden by the wifi/sleep_seconds setting
 
 class CustomBoard : public WifiBoard {
 private:
@@ -38,6 +42,8 @@ private:
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
     bool vbat_status = 0;
+    int battery_percent_ = -1;
+    int64_t battery_read_us_ = 0;
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {};
@@ -77,7 +83,8 @@ private:
     }
 
     // KEY: click pauses/resumes (the pomodoro when running, otherwise the
-    // music), double click skips to the next song, long press stops both.
+    // music), double click skips to the next song, triple click changes the
+    // play mode, long press stops both.
     void InitializeUserButton() {
         user_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
@@ -106,6 +113,14 @@ private:
             }
 #endif
         });
+        user_button_.OnMultipleClick(
+            [this]() {
+                power_save_timer_->WakeUp();
+#if CONFIG_USE_MUSIC_PLAYER
+                CycleMusicPlayMode();
+#endif
+            },
+            3);
         user_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
 #if CONFIG_USE_POMODORO
@@ -118,7 +133,9 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(240, POWER_SAVE_IDLE_SECONDS, -1);
+        Settings settings("wifi", false);
+        int idle_seconds = settings.GetInt("sleep_seconds", POWER_SAVE_IDLE_SECONDS);
+        power_save_timer_ = new PowerSaveTimer(240, idle_seconds, -1);
         power_save_timer_->OnEnterSleepMode([this]() { display_->SetPowerSaveMode(true); });
         power_save_timer_->OnExitSleepMode([this]() { display_->SetPowerSaveMode(false); });
         power_save_timer_->SetEnabled(true);
@@ -156,17 +173,24 @@ private:
 
         mcp_server.AddTool(
             "self.power.set_auto_sleep",
-            "Enable or disable automatic power saving. When enabled, after 3 idle minutes the "
+            "Enable or disable automatic power saving. When enabled, after the idle time the "
             "device stops listening for the wake word and sleeps to save battery; the user "
             "presses the BOOT button to wake it. Disable it when the device is on USB power "
-            "and the wake word should always work.",
-            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            "and the wake word should always work.\n"
+            "Args:\n"
+            "  `enabled`: Turn automatic power saving on or off.\n"
+            "  `minutes`: Idle minutes before sleeping (1-60, default 3).",
+            PropertyList({Property("enabled", kPropertyTypeBoolean),
+                          Property("minutes", kPropertyTypeInteger, 3, 1, 60)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 bool enabled = properties["enabled"].value<bool>();
+                int minutes = properties["minutes"].value<int>();
                 {
                     Settings settings("wifi", true);
                     settings.SetBool("sleep_mode", enabled);
+                    settings.SetInt("sleep_seconds", minutes * 60);
                 }
+                power_save_timer_->SetSecondsToSleep(minutes * 60);
                 power_save_timer_->SetEnabled(enabled);
                 return true;
             });
@@ -282,9 +306,17 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        // The status bar asks every second; ten ADC conversions per second is
+        // wasted work for a value that changes over minutes.
+        constexpr int64_t kBatteryCacheUs = 30LL * 1000 * 1000;
+        int64_t now = esp_timer_get_time();
+        if (battery_percent_ < 0 || now - battery_read_us_ >= kBatteryCacheUs) {
+            battery_percent_ = (int)BatterygetPercent();
+            battery_read_us_ = now;
+        }
         charging = false;
         discharging = !charging;
-        level = (int)BatterygetPercent();
+        level = battery_percent_;
 
         return true;
     }

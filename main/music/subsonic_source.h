@@ -1,6 +1,8 @@
 #ifndef MUSIC_SUBSONIC_SOURCE_H_
 #define MUSIC_SUBSONIC_SOURCE_H_
 
+#include <cJSON.h>
+
 #include "music_source.h"
 
 // Subsonic / OpenSubsonic API client (Navidrome, Gonic, Airsonic, ...).
@@ -14,12 +16,17 @@ public:
 
     const char* type() const override { return "subsonic"; }
     const std::string& base_url() const override { return base_url_; }
-    bool Search(const std::string& query, int limit, std::vector<MusicTrack>& tracks,
-                std::string& error) override;
+    bool Search(const std::string& query, const std::string& provider, int limit,
+                std::vector<MusicTrack>& tracks, std::string& error) override;
+    MusicTrack BuildTrack(const std::string& id, const std::string& title,
+                          const std::string& artist, bool live) const override;
     bool Ping(std::string& error) override;
     std::vector<LyricLine> FetchLyrics(const MusicTrack& track) override;
 
 private:
+    bool ParseSong(const cJSON* song, MusicTrack& track) const;
+    std::string StreamUrl(const std::string& id) const;
+
     std::string base_url_;
     std::string username_;
     std::string salt_;

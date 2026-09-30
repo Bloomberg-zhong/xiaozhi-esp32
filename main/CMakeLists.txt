@@ -49,6 +49,7 @@ if(CONFIG_USE_MUSIC_PLAYER)
     list(APPEND SOURCES
         "music/lrc_parser.cc"
         "music/local_music.cc"
+        "music/favorites.cc"
         "music/music_util.cc"
         "music/music_source.cc"
         "music/subsonic_source.cc"

@@ -60,6 +60,15 @@ public:
     void SetQueue(std::vector<MusicTrack> tracks, size_t start_index, bool loop = false,
                   std::string tag = "");
     std::string queue_tag() const;
+
+    // Queue management. Indexes are 0-based. Callers restart playback (through
+    // Application) when they change the current track.
+    void GetQueue(std::vector<MusicTrack>& tracks, size_t& index) const;
+    bool SelectIndex(size_t index);
+    // Returns how many tracks were added (the queue holds at most 100).
+    size_t AddToQueue(std::vector<MusicTrack> tracks, bool after_current);
+    bool RemoveFromQueue(size_t index);
+    void ClearQueue();
     bool HasTrack() const;
     bool GetCurrentTrack(MusicTrack& track) const;
     // Selects the next track. `automatic` means the current track ended by

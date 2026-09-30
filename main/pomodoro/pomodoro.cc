@@ -88,6 +88,11 @@ bool Pomodoro::IsActive() const {
     return phase_ != Phase::kIdle;
 }
 
+bool Pomodoro::IsPaused() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return phase_ != Phase::kIdle && paused_;
+}
+
 int64_t Pomodoro::RemainingUsLocked() const {
     if (phase_ == Phase::kIdle) {
         return 0;
@@ -318,12 +323,11 @@ void Pomodoro::RefreshDisplay() {
 void Pomodoro::AddTools(McpServer& server) {
     auto start = std::make_unique<McpTool>(
         "self.pomodoro.start",
-        "Start a pomodoro timer: a focus countdown, optionally followed by a break countdown. "
-        "White noise from the SD card folder `white-noise` can play during the focus time. A "
-        "running pomodoro is replaced.\n"
+        "Start a pomodoro timer: a focus countdown followed by a break countdown, with white "
+        "noise from the SD card while focusing. Replaces a running pomodoro.\n"
         "Args:\n"
         "  `focus_min`: Focus minutes (default 25).\n"
-        "  `break_min`: Break minutes after the focus time, 0 for no break (default 5).\n"
+        "  `break_min`: Break minutes, 0 for none (default 5).\n"
         "  `white_noise`: Play white noise while focusing (default true).",
         PropertyList({Property("focus_min", kPropertyTypeInteger, 25, 1, 120),
                       Property("break_min", kPropertyTypeInteger, 5, 0, 30),
@@ -367,26 +371,32 @@ void Pomodoro::AddTools(McpServer& server) {
     start->set_async(true);
     server.AddTool(std::move(start));
 
-    server.AddTool("self.pomodoro.stop", "Stop the pomodoro timer and its white noise.",
-                   PropertyList(), [](const PropertyList&) -> ReturnValue {
-                       Pomodoro::GetInstance().Stop();
-                       return true;
-                   });
-
-    server.AddTool("self.pomodoro.pause",
-                   "Pause the pomodoro timer, or resume it when it is paused.", PropertyList(),
-                   [](const PropertyList&) -> ReturnValue {
-                       if (!Pomodoro::GetInstance().IsActive()) {
-                           return std::string("No pomodoro is running");
-                       }
-                       Pomodoro::GetInstance().TogglePause();
-                       return true;
-                   });
-
-    server.AddTool("self.pomodoro.status",
-                   "Get the pomodoro state: phase (focus, break or idle), paused, remaining "
-                   "seconds and settings. Use it for questions like \"还剩多少时间\".",
-                   PropertyList(), [](const PropertyList&) -> ReturnValue {
-                       return Pomodoro::GetInstance().GetStatusJson();
-                   });
+    server.AddTool(
+        "self.pomodoro.control",
+        "Control the running pomodoro timer.\n"
+        "Args:\n"
+        "  `action`: `pause`, `resume`, `stop` (also stops the white noise) or `status` (phase "
+        "focus/break/idle, paused, remaining seconds; use it for \"还剩多少时间\").",
+        PropertyList({Property("action", kPropertyTypeString)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& pomodoro = Pomodoro::GetInstance();
+            const std::string action = properties["action"].value<std::string>();
+            if (action == "status") {
+                return pomodoro.GetStatusJson();
+            }
+            if (action != "pause" && action != "resume" && action != "stop") {
+                return std::string("Unknown action: ") + action;
+            }
+            if (!pomodoro.IsActive()) {
+                return std::string("No pomodoro is running");
+            }
+            if (action == "stop") {
+                pomodoro.Stop();
+            } else if (action == "pause" && !pomodoro.IsPaused()) {
+                pomodoro.TogglePause();
+            } else if (action == "resume" && pomodoro.IsPaused()) {
+                pomodoro.TogglePause();
+            }
+            return true;
+        });
 }
