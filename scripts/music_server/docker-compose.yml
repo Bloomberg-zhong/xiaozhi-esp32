@@ -1,0 +1,39 @@
+# Music server plus an HTTPS reverse proxy on your own domain.
+#
+#   1. cp .env.example .env   and fill in MUSIC_DOMAIN and XZ_MUSIC_API_KEY
+#   2. cp config.example.json config.json   and enable the catalogs you want
+#   3. docker compose up -d
+#
+# Caddy fetches and renews the certificate by itself; the domain must point at
+# this machine and ports 80 and 443 must be reachable.
+services:
+  music-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      XZ_MUSIC_API_KEY: ${XZ_MUSIC_API_KEY:-}
+      JAMENDO_CLIENT_ID: ${JAMENDO_CLIENT_ID:-}
+    volumes:
+      - ./config.json:/config/config.json:ro
+      - ${MUSIC_DIR:-./music}:/music:ro
+    expose:
+      - "8090"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - music-server
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MUSIC_DOMAIN: ${MUSIC_DOMAIN:?set MUSIC_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

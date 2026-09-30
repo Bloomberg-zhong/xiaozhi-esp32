@@ -1,0 +1,17 @@
+{
+  "host": "0.0.0.0",
+  "port": 8090,
+  "trust_proxy": true,
+  "api_keys": [],
+  "rate_limit_per_minute": 240,
+  "max_streams": 6,
+  "provider_order": ["local", "subsonic", "jamendo", "archive", "radio"],
+  "providers": {
+    "local": { "music_dir": "/music" },
+    "archive": { "collections": ["netlabels", "audio_music", "etree"] },
+    "jamendo": { "client_id": "" },
+    "radio": { "countrycode": "" },
+    "subsonic": { "url": "", "username": "", "password": "", "max_bitrate_kbps": 128 }
+  },
+  "plugins": []
+}

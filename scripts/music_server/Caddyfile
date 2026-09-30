@@ -1,0 +1,6 @@
+{$MUSIC_DOMAIN} {
+	# Streams must not be buffered or compressed.
+	reverse_proxy music-server:8090 {
+		flush_interval -1
+	}
+}
