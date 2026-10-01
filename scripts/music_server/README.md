@@ -12,9 +12,39 @@ needs one address: your domain. Standard library only, Python 3.9+.
 | `local` | A folder of audio files on this machine | a folder |
 
 Lyrics come from the catalog when it has them, otherwise from the free
-[LRCLIB](https://lrclib.net) service. Commercial streaming services are not
-included: their catalogs cannot be streamed for free without bypassing their
-licensing. Add a catalog you are allowed to use as a plugin (below).
+[LRCLIB](https://lrclib.net) service. The built-in catalogs do not include
+commercial streaming platforms. An empty result means the configured catalogs
+did not find the song; it does not establish a copyright restriction. Additional
+catalogs can be connected through plugins (below).
+
+### Connect an existing Go Music API gateway
+
+The bundled `gateway_plugin` adapts an operator-configured gateway to this
+server's `/search`, `/stream` and `/lyrics` API. Add these settings to your
+configuration, keeping your existing providers:
+
+```json
+{
+  "plugins": ["gateway_plugin"],
+  "provider_order": ["local", "gateway", "archive", "radio"],
+  "providers": {
+    "gateway": {
+      "url": "http://host.docker.internal:8080",
+      "sources": ["kuwo", "qq", "netease"],
+      "max_probes": 8
+    }
+  }
+}
+```
+
+`host.docker.internal` reaches the host's existing gateway from Docker Desktop.
+Use your gateway's actual address in other deployments. Only that configured
+host is trusted for LAN access. Search probes a bounded shortlist, excludes
+audio the gateway reports as unavailable, and prioritizes an exact title/artist
+match over Demo, Live and other variants. Titles and artists are kept as supplied
+by the catalog. Stream requests resolve through the gateway each time; Range
+requests and catalog lyrics are forwarded. The adapter does not unlock tracks
+that the upstream source refuses to serve.
 
 ## Try it
 

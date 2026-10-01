@@ -26,7 +26,8 @@ MCP tools; songs are streamed from your own music server (or the SD card) and de
 | `subsonic` | 你自己的 Navidrome / Gonic | 你的服务器 |
 | `local` | 服务器上的一个音乐文件夹 | 文件夹 |
 
-不含网易云、QQ 音乐等商业平台：它们的音乐无法在不绕过版权和会员限制的前提下免费播放。自己有权使用的音乐
+内置曲库不包含网易云、QQ 音乐等商业平台；已有音乐网关可通过 `gateway_plugin` 接入，见服务器 README。
+找不到歌曲仅表示所配置的曲库未命中，不应直接解释为版权受限。自己有权使用的音乐
 源可以写成服务器插件接入（见服务器 README）。
 
 **域名写在哪里：**
