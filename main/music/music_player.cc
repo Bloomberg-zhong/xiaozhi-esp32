@@ -31,7 +31,9 @@ namespace {
 constexpr uint32_t kSessionIdFlag = 0x80000000;  // Keeps ids distinct from notify playback ids
 constexpr uint32_t kNetTaskStackSize = 8192;
 constexpr uint32_t kDecodeTaskStackSize = 8192;
-constexpr UBaseType_t kNetTaskPriority = 3;
+// Both music tasks stay below the AFE task ("audio_afe", priority 3): echo
+// cancellation and wake-word detection must never wait for the stream reader.
+constexpr UBaseType_t kNetTaskPriority = 2;
 constexpr UBaseType_t kDecodeTaskPriority = 2;
 constexpr size_t kFallbackBufferSize = 32 * 1024;
 constexpr size_t kNetChunkSize = 2048;

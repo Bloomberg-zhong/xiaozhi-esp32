@@ -8,7 +8,6 @@
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
                 "CONFIG_USE_DEVICE_AEC=y",
-                "CONFIG_FORCE_AUTO_STOP_LISTENING=y",
                 "CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y",
                 "CONFIG_USE_MUSIC_PLAYER=y",
                 "CONFIG_PM_ENABLE=y",

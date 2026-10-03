@@ -222,13 +222,17 @@ int main() {
                     result = subprocess.run([str(exe)], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_wake_word_detection_stays_available_in_conversation(self):
+    def test_conversation_keeps_the_official_realtime_interruption(self):
+        """Voice uplink must stay on while the assistant speaks, otherwise the user
+        can only interrupt with the wake word, and the weaker AEC that mode needs
+        makes the wake word less reliable while music plays."""
         config = json.loads((BOARD / "config.json").read_text())
         for build in config["builds"]:
             with self.subTest(variant=build["name"]):
-                self.assertIn("CONFIG_USE_DEVICE_AEC=y", build["sdkconfig_append"])
-                self.assertIn("CONFIG_FORCE_AUTO_STOP_LISTENING=y", build["sdkconfig_append"])
-                self.assertIn("CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y", build["sdkconfig_append"])
+                options = build["sdkconfig_append"]
+                self.assertIn("CONFIG_USE_DEVICE_AEC=y", options)
+                self.assertIn("CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y", options)
+                self.assertNotIn("CONFIG_FORCE_AUTO_STOP_LISTENING=y", options)
 
 
 if __name__ == "__main__":
