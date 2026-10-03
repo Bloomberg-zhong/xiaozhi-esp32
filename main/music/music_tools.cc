@@ -20,7 +20,7 @@
 
 namespace {
 
-constexpr int kSearchLimit = 20;
+constexpr int kSearchLimit = 10;
 constexpr size_t kMaxLocalQueue = 200;
 constexpr size_t kMaxListed = 30;
 constexpr const char* kSettingsNamespace = "music";

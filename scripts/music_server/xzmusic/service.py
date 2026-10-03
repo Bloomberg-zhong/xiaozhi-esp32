@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.error
 from typing import Dict, List, Optional, Tuple
 
@@ -18,6 +19,7 @@ log = logging.getLogger("xzmusic")
 
 MAX_LIMIT = 50
 SEARCH_TTL = 60.0
+SEARCH_GRACE = 1.0  # Extra wait for slower catalogs once one has answered
 
 
 def _normalize(text: str) -> str:
@@ -101,7 +103,7 @@ class MusicService:
         errors: Dict[str, str] = {}
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(chosen))
         futures = {pool.submit(p.search, query, limit): p for p in chosen}
-        done, pending = concurrent.futures.wait(futures, timeout=self.search_timeout)
+        done, pending = self._wait_for_results(futures)
         for future in done:
             provider = futures[future]
             try:
@@ -121,6 +123,34 @@ class MusicService:
         if tracks:  # Do not remember failures
             self.cache.set(key, outcome, SEARCH_TTL)
         return outcome
+
+    def _wait_for_results(self, futures):
+        """Waits for the providers, but does not let a slow one hold up the answer.
+
+        Once any provider has returned songs, the rest only get a short grace
+        period so one sluggish catalog cannot delay playback for seconds.
+        """
+        deadline = time.monotonic() + self.search_timeout
+        done: set = set()
+        pending = set(futures)
+        grace_until = None
+        while pending:
+            now = time.monotonic()
+            limit = deadline if grace_until is None else min(deadline, grace_until)
+            if now >= limit:
+                break
+            finished, pending = concurrent.futures.wait(
+                pending, timeout=limit - now, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            done |= finished
+            if grace_until is None:
+                for future in finished:
+                    try:
+                        if future.result():
+                            grace_until = time.monotonic() + SEARCH_GRACE
+                    except Exception:
+                        pass
+        return done, pending
 
     @staticmethod
     def _interleave(lists: List[List[Track]], limit: int) -> List[Track]:
