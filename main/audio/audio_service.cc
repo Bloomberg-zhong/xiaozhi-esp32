@@ -324,6 +324,7 @@ void AudioService::AudioInputTask() {
 }
 
 void AudioService::AudioOutputTask() {
+    uint32_t previous_playback_id = UINT32_MAX;
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(
@@ -349,6 +350,11 @@ void AudioService::AudioOutputTask() {
         }
 
         codec_->OutputData(task.pcm);
+        if (task.playback_id != previous_playback_id) {
+            ESP_LOGI(TAG, "First speaker output: playback_id=%lu, samples=%u",
+                     static_cast<unsigned long>(task.playback_id), unsigned(task.pcm.size()));
+            previous_playback_id = task.playback_id;
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();

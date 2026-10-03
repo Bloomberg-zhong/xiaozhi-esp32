@@ -645,6 +645,14 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+#if CONFIG_USE_MUSIC_PLAYER
+        const int64_t wake_started = music_wake_started_us_.exchange(0);
+        if (wake_started != 0) {
+            ESP_LOGI(TAG, "Music wake first reply audio: %ld ms, state=%d, bytes=%u",
+                     long((esp_timer_get_time() - wake_started) / 1000), int(GetDeviceState()),
+                     unsigned(packet->payload.size()));
+        }
+#endif
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
@@ -1039,7 +1047,13 @@ void Application::HandleWakeWordDetectedEvent() {
         BeginWakeWordInvoke(wake_word);
 #if CONFIG_USE_MUSIC_PLAYER
     } else if (state == kDeviceStatePlaying) {
+        music_wake_started_us_.store(esp_timer_get_time());
         SuspendMusicForChat();
+#if CONFIG_SEND_WAKE_WORD_DATA
+        // Acknowledge locally while the voice channel and server reply are pending.
+        // Pause clears the decoder, so queue the cue only after suspending music.
+        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+#endif
         BeginWakeWordInvoke(wake_word);
 #endif
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {

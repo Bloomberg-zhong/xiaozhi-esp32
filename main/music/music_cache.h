@@ -73,10 +73,11 @@ public:
     bool ReadLyrics(const MusicTrack& track, const std::string& source_base,
                     std::string& text) const;
     std::vector<MusicTrack> Pending(const std::string& source_base) const;
-    // Managed cache files are included in offline scans only after integrity
-    // verification; this also restores the original unescaped title/artist.
+    // Restore the original title/artist and reject missing/truncated managed audio.
+    // Fast listings may defer the checksum; PinLocal still verifies before playback.
     static bool IsManagedPath(const std::string& audio_path);
-    static bool ReadTrack(const std::string& audio_path, MusicTrack& track);
+    static bool ReadTrack(const std::string& audio_path, MusicTrack& track,
+                          bool verify_audio = true);
 
 private:
     std::string root_;

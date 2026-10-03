@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#ifdef ESP_PLATFORM
+#include <esp_log.h>
+#endif
 
 namespace {
 
@@ -66,6 +69,9 @@ MusicTrack MakeTrack(const std::string& folder, const std::string& name) {
 
 void Scan(const std::string& folder, int depth, const LocalMusicScanOptions& options,
           std::vector<MusicTrack>& tracks) {
+#ifdef ESP_PLATFORM
+    ESP_LOGI("LocalMusic", "Scanning folder: %s", folder.c_str());
+#endif
     DIR* dir = opendir(folder.c_str());
     if (dir == nullptr) {
         return;
@@ -97,6 +103,10 @@ void Scan(const std::string& folder, int depth, const LocalMusicScanOptions& opt
         }
     }
     closedir(dir);
+#ifdef ESP_PLATFORM
+    ESP_LOGI("LocalMusic", "Listed %s: %u audio files, %u folders", folder.c_str(),
+             unsigned(files.size()), unsigned(folders.size()));
+#endif
 
     std::sort(files.begin(), files.end());
     std::sort(folders.begin(), folders.end());
@@ -105,8 +115,11 @@ void Scan(const std::string& folder, int depth, const LocalMusicScanOptions& opt
             return;
         }
         MusicTrack track = MakeTrack(folder, name);
+#ifdef ESP_PLATFORM
+        ESP_LOGI("LocalMusic", "Inspecting song: %s", track.stream_url.c_str());
+#endif
         if (MusicCache::IsManagedPath(track.stream_url) &&
-            !MusicCache::ReadTrack(track.stream_url, track)) {
+            !MusicCache::ReadTrack(track.stream_url, track, options.verify_cache_audio)) {
             continue;
         }
         tracks.push_back(std::move(track));

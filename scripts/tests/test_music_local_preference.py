@@ -11,6 +11,14 @@ MUSIC = ROOT / "main/music"
 
 
 class MusicLocalPreferenceTests(unittest.TestCase):
+    def test_voice_search_defers_checksums_until_after_matching(self):
+        source = (MUSIC / "music_tools.cc").read_text()
+        selection = source.split("SearchOutcome SearchMusic(", 1)[1].split(
+            "bool ParseModeArgument(", 1
+        )[0]
+        self.assertIn("options.verify_cache_audio = false;", selection)
+        self.assertLess(selection.index("FilterLocalMusic("), selection.index("MusicCache::ReadTrack("))
+
     def test_implicit_song_query_prefers_stored_tracks_and_preserves_source_selection(self):
         source = (MUSIC / "music_tools.cc").read_text()
         selection = "struct SearchOutcome {" + source.split("struct SearchOutcome {", 1)[1].split(

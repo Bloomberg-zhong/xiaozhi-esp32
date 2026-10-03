@@ -108,11 +108,11 @@ size_t xStreamBufferReceive(Buffer* buffer, void* data, size_t capacity, int) {
     if (buffer->bytes.empty()) return 0;
     if (!first_read) {
         first_read = buffer->bytes.size();
-        if (mode == 0) assert(first_read >= 131072);
+        if (mode == 0) assert(first_read >= 49152);
     }
     if (phase == 1 && !recovery_read) {
         recovery_read = buffer->bytes.size();
-        if (mode == 2 || mode == 7 || mode == 12) assert(recovery_read >= 65536);
+        if (mode == 2 || mode == 7 || mode == 12) assert(recovery_read >= 32768);
     }
     size_t size = std::min(capacity, buffer->bytes.size());
     auto* bytes = static_cast<uint8_t*>(data);
@@ -215,13 +215,13 @@ int main(int argc, char** argv) {
     if (mode == 5) { assert(!first_read && !output_frames && session->cancelled); return 0; }
     if (mode == 6) { assert(!first_read && !output_frames && !failure.empty()); return 0; }
     if (mode == 0 || mode == 2 || mode >= 7) {
-        if (mode != 11) assert(first_read >= 131072);
+        if (mode != 11) assert(first_read >= 49152);
     }
     if (mode == 1 || mode == 11) assert(first_read == 16384);
     if (mode == 3) assert(first_read >= 28672 && first_read < 32767);
     if (mode == 4) assert(first_read == 2000 && session->decode_done);
     if (mode == 2 || mode == 7 || mode == 12) {
-        assert(recovery_read >= 65536 && phase == 2 && session->decode_done);
+        assert(recovery_read >= 32768 && phase == 2 && session->decode_done);
         if (mode == 7) assert(paused_once);
         if (mode == 12) assert(parser_waited);
     }

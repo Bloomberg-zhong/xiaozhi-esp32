@@ -152,6 +152,18 @@ int main() {
  player.NetTask(cached_session);
  assert(cached_session->storage.bytes == "ID3abcde");
  assert(opens == old_opens && remote_lyrics == old_lyrics);
+ // A fast SD listing still requires integrity validation of the selected song.
+ auto local_session = std::make_shared<Session>();
+ local_session->track = hit->track; local_session->local_root = root;
+ player.NetTask(local_session);
+ assert(local_session->storage.bytes == song && !local_session->net_failed);
+ { std::fstream damaged(hit->track.stream_url, std::ios::in | std::ios::out); damaged.put('X'); }
+ auto damaged_session = std::make_shared<Session>();
+ damaged_session->track = hit->track; damaged_session->local_root = root;
+ player.NetTask(damaged_session);
+ assert(damaged_session->net_failed && damaged_session->storage.bytes.empty());
+ assert(opens == old_opens && remote_lyrics == old_lyrics);
+ { std::ofstream restored(hit->track.stream_url, std::ios::binary); restored << song; }
  // A foreground replay must consume an existing prefix from SD, then request
  // only the missing suffix. Downloading the prefix again wastes the network.
  auto partial_track = session->track; partial_track.id = "partial-replay";

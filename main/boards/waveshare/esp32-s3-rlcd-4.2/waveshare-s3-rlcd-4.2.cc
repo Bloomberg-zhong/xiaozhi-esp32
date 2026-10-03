@@ -112,7 +112,7 @@ private:
     void InitializeUserButton() {
         user_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
-            Application::GetInstance().Schedule([this]() {
+            Application::GetInstance().Schedule([]() {
 #if CONFIG_USE_MUSIC_PLAYER
                 auto& app = Application::GetInstance();
                 auto& player = app.GetMusicPlayer();
@@ -126,7 +126,7 @@ private:
         });
         user_button_.OnDoubleClick([this]() {
             power_save_timer_->WakeUp();
-            Application::GetInstance().Schedule([this]() {
+            Application::GetInstance().Schedule([]() {
 #if CONFIG_USE_MUSIC_PLAYER
                 auto& app = Application::GetInstance();
                 if (app.GetMusicPlayer().IsPlaying() || app.GetMusicPlayer().IsPaused()) {
@@ -138,7 +138,7 @@ private:
         user_button_.OnMultipleClick(
             [this]() {
                 power_save_timer_->WakeUp();
-                Application::GetInstance().Schedule([this]() {
+                Application::GetInstance().Schedule([]() {
 #if CONFIG_USE_MUSIC_PLAYER
                     auto& app = Application::GetInstance();
                     if (app.GetMusicPlayer().IsPlaying() || app.GetMusicPlayer().IsPaused()) {
@@ -149,6 +149,7 @@ private:
             },
             3);
         user_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "KEY long press detected");
             power_save_timer_->WakeUp();
             Application::GetInstance().Schedule([this]() {
 #if CONFIG_USE_MUSIC_PLAYER
@@ -156,15 +157,24 @@ private:
                 auto state = app.GetDeviceState();
                 bool stop = local_music_scan_pending_ || app.GetMusicPlayer().IsPlaying() ||
                             app.GetMusicPlayer().IsPaused();
-                if (!stop && (state == kDeviceStateIdle || state == kDeviceStateStarting ||
-                              state == kDeviceStateWifiConfiguring)) {
+                ESP_LOGI(TAG, "KEY long press: state=%d pending=%d playing=%d paused=%d",
+                         int(state), local_music_scan_pending_, app.GetMusicPlayer().IsPlaying(),
+                         app.GetMusicPlayer().IsPaused());
+                if (!stop &&
+                    (state == kDeviceStateIdle || state == kDeviceStateStarting ||
+                     state == kDeviceStateWifiConfiguring || state == kDeviceStateActivating)) {
                     StartLocalMusic();
+                    return;
+                }
+                if (!stop) {
+                    display_->ShowNotification("对话中，请结束后再长按播放", 3000);
                     return;
                 }
                 ++local_music_scan_revision_;
                 local_music_scan_pending_ = false;
                 app.StopMusic();
                 display_->RequestPage(rlcd_dashboard::DashboardPage::kHome);
+                display_->ShowNotification("已停止，再长按播放内存卡", 3000);
 #endif
             });
         });
@@ -191,14 +201,19 @@ private:
             std::make_unique<ScanRequest>(ScanRequest{this, root, ++local_music_scan_revision_});
         local_music_scan_pending_ = true;
         local_music_scan_running_ = true;
+        ESP_LOGI(TAG, "KEY local scan starting: %s", root.c_str());
         display_->ShowNotification("正在读取内存卡音乐", 3000);
         BaseType_t result = xTaskCreate(
             [](void* arg) {
                 std::unique_ptr<ScanRequest> request(static_cast<ScanRequest*>(arg));
                 LocalMusicScanOptions options;
                 options.max_tracks = 100;  // Same bound as the playback queue
+                // Do not read every song's payload before showing the player.
+                // The selected managed song is validated by PinLocal on music_net.
+                options.verify_cache_audio = false;
                 options.excluded_folders.push_back(kWhiteNoiseFolder);
                 auto tracks = ScanLocalMusic(request->root, options);
+                ESP_LOGI(TAG, "KEY local scan complete: %u tracks", unsigned(tracks.size()));
                 auto* board = request->board;
                 const uint32_t revision = request->revision;
                 Application::GetInstance().Schedule(

@@ -3,6 +3,8 @@
 #include <functional>
 #include <utility>
 #include "device_state.h"
+#include "esp_log.h"
+#define TAG "test"
 #define CONFIG_USE_MUSIC_PLAYER 1
 #define CONFIG_USE_POMODORO 1
 namespace rlcd_dashboard {
@@ -60,6 +62,8 @@ struct Pomodoro {
 };
 struct Display {
     int homes = 0;
+    int notices = 0;
+    void ShowNotification(const char*, int) { ++notices; }
     void RequestPage(rlcd_dashboard::DashboardPage) { ++homes; }
 };
 struct Power {
@@ -132,4 +136,17 @@ int main() {
     app.Drain();
     assert(board.local_music_scan_revision_ != revision && !board.local_music_scan_pending_);
     assert(board.local_starts == 3);
+
+    // Boot activation must not silently swallow a local-library request.
+    app.state = kDeviceStateActivating;
+    board.user_button_.hold();
+    app.Drain();
+    assert(board.local_starts == 4);
+    const int stops = app.stops;
+    const int notices = board.display.notices;
+    app.state = kDeviceStateListening;
+    board.user_button_.hold();
+    app.Drain();
+    assert(board.local_starts == 4 && app.stops == stops);
+    assert(board.display.notices == notices + 1);
 }

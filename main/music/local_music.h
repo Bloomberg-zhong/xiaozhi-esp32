@@ -17,6 +17,8 @@ constexpr const char* kWhiteNoiseFolder = "white-noise";
 struct LocalMusicScanOptions {
     size_t max_tracks = 500;
     int max_depth = 4;
+    // Fast listings defer the managed audio checksum to the selected track's reader.
+    bool verify_cache_audio = true;
     // Folder names (case-insensitive) skipped at any depth.
     std::vector<std::string> excluded_folders;
 };

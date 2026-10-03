@@ -6,6 +6,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -157,6 +158,7 @@ private:
     uint32_t notification_playback_id_ = 0;
 #if CONFIG_USE_MUSIC_PLAYER
     MusicPlayer music_player_;
+    std::atomic<int64_t> music_wake_started_us_{0};
     bool network_connected_ = false;    // Local playback may precede voice activation
     bool pending_music_start_ = false;  // Waiting for the reply audio to drain
     int music_failures_ = 0;

@@ -11,6 +11,87 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class MusicHandoffTest(unittest.TestCase):
+    def test_music_wake_acknowledges_after_pause_before_opening_channel(self):
+        source = (ROOT / "main/application.cc").read_text()
+        callback = "void Application::HandleWakeWordDetectedEvent()" + source.split(
+            "void Application::HandleWakeWordDetectedEvent()", 1
+        )[1].split("void Application::BeginWakeWordInvoke", 1)[0]
+        driver = r'''
+#include <atomic>
+#include <cassert>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "device_state.h"
+#define CONFIG_USE_MUSIC_PLAYER 1
+#define ESP_LOGI(...) ((void)0)
+#define TAG "test"
+enum { kAbortReasonWakeWordDetected };
+int64_t esp_timer_get_time() { return 1000; }
+namespace Lang::Sounds { constexpr std::string_view OGG_POPUP = "popup"; }
+std::vector<std::string> actions;
+struct Audio {
+    std::string GetLastWakeWord() { return "你好小智"; }
+    void EnableWakeWordDetection(bool) { actions.push_back("enable_wake"); }
+    std::unique_ptr<int> PopPacketFromSendQueue() { return nullptr; }
+    void ResetDecoder() { actions.push_back("reset"); }
+    void PlaySound(std::string_view sound) { assert(sound == "popup"); actions.push_back("popup"); }
+};
+struct Protocol { void SendStartListening(int) {} };
+struct Application {
+    std::unique_ptr<Protocol> protocol_ = std::make_unique<Protocol>();
+    Audio audio_service_;
+    DeviceState state = kDeviceStatePlaying;
+    std::atomic<int64_t> music_wake_started_us_{0};
+    bool play_popup_on_listening_ = false;
+    DeviceState GetDeviceState() { return state; }
+    void SetDeviceState(DeviceState s) { state = s; }
+    void SuspendMusicForChat() { actions.push_back("pause"); audio_service_.ResetDecoder(); state = kDeviceStateIdle; }
+    void BeginWakeWordInvoke(const std::string&) { assert(state == kDeviceStateIdle); actions.push_back("connect"); }
+    void StopNotification() { state = kDeviceStateIdle; }
+    void AbortSpeaking(int) {}
+    int GetDefaultListeningMode() { return 0; }
+    void SetListeningMode(int) {}
+    void HandleWakeWordDetectedEvent();
+};
+'''
+        driver += callback + r'''
+int main() {
+    Application app;
+    app.HandleWakeWordDetectedEvent();
+#if CONFIG_SEND_WAKE_WORD_DATA
+    assert((actions == std::vector<std::string>{"pause", "reset", "popup", "connect"}));
+#else
+    assert((actions == std::vector<std::string>{"pause", "reset", "connect"}));
+#endif
+    actions.clear();
+    app.state = kDeviceStateIdle;
+    app.HandleWakeWordDetectedEvent();
+    assert((actions == std::vector<std::string>{"connect"}));
+    actions.clear();
+    app.protocol_.reset();
+    app.state = kDeviceStatePlaying;
+    app.HandleWakeWordDetectedEvent();
+    assert((actions == std::vector<std::string>{"enable_wake"}));
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            cpp = pathlib.Path(temp) / "wake.cc"
+            exe = pathlib.Path(temp) / "wake"
+            cpp.write_text(driver)
+            for send_wake_data in (0, 1):
+                with self.subTest(send_wake_data=send_wake_data):
+                    result = subprocess.run(
+                        [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                         f"-DCONFIG_SEND_WAKE_WORD_DATA={send_wake_data}",
+                         "-I" + str(ROOT / "main"), str(cpp), "-o", str(exe)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    result = subprocess.run([str(exe)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_wake_reply_keeps_conversation_open_until_explicit_music_request(self):
         source = (ROOT / "main/application.cc").read_text()
         callback = source.split(

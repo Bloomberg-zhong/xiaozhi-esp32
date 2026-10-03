@@ -12,6 +12,7 @@
 #include "favorites.h"
 #include "local_music.h"
 #include "mcp_server.h"
+#include "music_cache.h"
 #include "music_player.h"
 #include "music_source.h"
 #include "music_util.h"
@@ -137,10 +138,21 @@ SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const s
             return outcome;
         }
         LocalMusicScanOptions options;
+        options.verify_cache_audio = false;
         options.excluded_folders.push_back(kWhiteNoiseFolder);
-        outcome.tracks = FilterLocalMusic(ScanLocalMusic(root, options), query);
-        if (outcome.tracks.size() > static_cast<size_t>(limit)) {
-            outcome.tracks.resize(limit);
+        auto matches = FilterLocalMusic(ScanLocalMusic(root, options), query);
+        for (auto& track : matches) {
+            // A named request verifies only matching candidates, preserving online
+            // fallback for damaged cache entries without reading the whole library.
+            // An unfiltered local catalog defers checksums to PinLocal at playback.
+            if (!query.empty() && MusicCache::IsManagedPath(track.stream_url) &&
+                !MusicCache::ReadTrack(track.stream_url, track)) {
+                continue;
+            }
+            outcome.tracks.push_back(std::move(track));
+            if (outcome.tracks.size() >= static_cast<size_t>(limit)) {
+                break;
+            }
         }
         outcome.ok = !outcome.tracks.empty();
         if (outcome.ok) {

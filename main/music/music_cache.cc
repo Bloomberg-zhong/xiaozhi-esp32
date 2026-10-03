@@ -527,9 +527,12 @@ bool MusicCache::IsManagedPath(const std::string& path) {
            path.find(" [xz-") != std::string::npos;
 }
 
-bool MusicCache::ReadTrack(const std::string& path, MusicTrack& track) {
+bool MusicCache::ReadTrack(const std::string& path, MusicTrack& track, bool verify_audio) {
     Metadata metadata;
-    if (!ReadMetadata(path, metadata) || !ValidAudio(path, metadata)) {
+    struct stat audio_info;
+    if (!ReadMetadata(path, metadata) || !RegularFile(path, audio_info) ||
+        static_cast<uint64_t>(audio_info.st_size) != metadata.bytes ||
+        (verify_audio && !ValidAudio(path, metadata))) {
         return false;
     }
     track = std::move(metadata.track);

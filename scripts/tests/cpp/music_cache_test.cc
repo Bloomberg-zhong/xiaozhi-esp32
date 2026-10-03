@@ -66,6 +66,14 @@ int main() {
     }
     assert(!cache.Find(song, "https://source"));
     assert(ScanLocalMusic(root).empty());
+    LocalMusicScanOptions fast_scan;
+    fast_scan.verify_cache_audio = false;
+    auto fast_list = ScanLocalMusic(root, fast_scan);
+    assert(fast_list.size() == 1 && fast_list[0].title == song.title);
+    // Listing may defer bitrot detection, but playback must still reject it.
+    assert(!cache.PinLocal(fast_list[0].stream_url));
+    std::filesystem::resize_file(hit->track.stream_url, bytes.size() - 1);
+    assert(ScanLocalMusic(root, fast_scan).empty());  // truncated audio is never listed
     std::string first_path = hit->track.stream_url;
     hit.reset();
     {

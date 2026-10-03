@@ -233,6 +233,7 @@ int main() {
                 self.assertIn("CONFIG_USE_DEVICE_AEC=y", options)
                 self.assertIn("CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y", options)
                 self.assertNotIn("CONFIG_FORCE_AUTO_STOP_LISTENING=y", options)
+                self.assertIn("CONFIG_FORCE_AUTO_STOP_LISTENING=n", options)
 
 
 if __name__ == "__main__":

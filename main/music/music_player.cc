@@ -763,6 +763,12 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
     MusicCache cache(session->local_root);
     if (IsLocalMusicPath(session->track.stream_url)) {
         session->cache_entry = cache.PinLocal(session->track.stream_url);
+        if (MusicCache::IsManagedPath(session->track.stream_url) && !session->cache_entry) {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            session->error = "cached music file is incomplete or damaged";
+            session->net_failed = true;
+            return;
+        }
         ReadLocalFile(session);
         return;
     }
