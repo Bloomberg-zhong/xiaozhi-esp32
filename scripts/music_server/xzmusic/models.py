@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit
 
 
 @dataclass
@@ -21,6 +21,8 @@ class Track:
     stream_url: str = ""
     # Lyrics the provider already has (LRC text), if any.
     lyrics: Optional[str] = None
+    # Original artwork is private provider metadata, never a client fetch URL.
+    cover_url: str = ""
 
     def to_json(self) -> dict:
         data = {
@@ -33,6 +35,8 @@ class Track:
         }
         if self.duration_ms > 0:
             data["duration_ms"] = self.duration_ms
+        if self.cover_url:
+            data["cover_url"] = "/cover/" + quote(self.id, safe="") + "?size=128"
         if self.live:
             data["live"] = True
         else:
@@ -53,6 +57,25 @@ class UnknownSource(Exception):
 
 class NotFound(Exception):
     pass
+
+
+class ArtworkUnavailable(Exception):
+    """Optional artwork normalization support is not installed."""
+
+
+def artwork_url(value, base: str = "") -> str:
+    """Accept HTTP artwork references; fetching still uses the SSRF guard."""
+    if not isinstance(value, str) or not value or any(ord(c) <= 32 or c == "\\" for c in value):
+        return ""
+    try:
+        url = urljoin(base + "/", value) if base else value
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+            return ""
+        parts.port  # Reject malformed ports before they reach urllib.
+        return url
+    except ValueError:
+        return ""
 
 
 def split_id(track_id: str):

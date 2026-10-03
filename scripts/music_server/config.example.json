@@ -5,6 +5,7 @@
   "api_keys": [],
   "rate_limit_per_minute": 240,
   "max_streams": 6,
+  "trusted_artwork_hosts": [],
   "provider_order": ["local", "subsonic", "jamendo", "archive", "radio"],
   "providers": {
     "local": { "music_dir": "/music" },

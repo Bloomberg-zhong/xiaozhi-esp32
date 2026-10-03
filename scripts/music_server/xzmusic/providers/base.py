@@ -13,6 +13,7 @@ class Context:
 
     fetcher: Fetcher
     cache: TTLCache
+    trusted_artwork_hosts: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +54,24 @@ class Provider:
     def lyrics(self, track: Track) -> Optional[str]:
         """LRC text the catalog itself has, or None."""
         return track.lyrics
+
+    def resolve_cover(self, track: Track) -> Track:
+        """Restore missing artwork metadata only when a cover is requested."""
+        return track
+
+    def cover_bytes(self, track: Track) -> bytes:
+        if not track.cover_url:
+            raise NotFound("no cover")
+        fetcher = self.fetcher
+        if self.context.trusted_artwork_hosts:
+            # Trust is scoped to this artwork request and its guarded redirects;
+            # audio/search keep the original fetcher and its host policy.
+            fetcher = Fetcher(
+                allow_private_hosts=fetcher.allow_private_hosts,
+                trusted_hosts=fetcher.trusted_hosts | set(self.context.trusted_artwork_hosts),
+                timeout=fetcher.timeout,
+            )
+        return fetcher.get_bytes(track.cover_url, max_bytes=2 * 1024 * 1024)
 
     def open_stream(self, track: Track, range_header: Optional[str]) -> StreamResponse:
         """Audio for `track`, honouring an optional Range header."""

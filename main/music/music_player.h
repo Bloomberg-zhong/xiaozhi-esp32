@@ -6,9 +6,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -35,9 +37,9 @@ bool ParseMusicPlayMode(const std::string& name, MusicPlayMode& mode);
 // Each started track owns a session with two background tasks: an HTTP reader
 // that fills a bounded stream buffer (in PSRAM when available) and a decoder
 // that turns MP3/AAC/M4A/FLAC/WAV into 16-bit mono PCM at the codec output
-// rate. Pausing only stops the decoder, so the HTTP connection and buffered
-// audio survive a conversation; the reader reconnects with a Range request if
-// the server drops the connection meanwhile.
+// rate. Pausing retains the decoder and buffered audio, but releases the HTTP
+// connection so it cannot hold Wi-Fi receive buffers needed by a conversation.
+// The reader reconnects with a Range request on resume or after a network drop.
 //
 // Queue and status methods are thread-safe. Play(), Pause() and Stop() are
 // called by Application from the main task.
@@ -105,6 +107,11 @@ public:
 private:
     struct Session;
     struct TaskContext;
+    struct CacheJob {
+        MusicTrack track;
+        std::shared_ptr<MusicSource> source;
+        std::string root;
+    };
 
     AudioService& audio_service_;
     mutable std::mutex mutex_;
@@ -124,14 +131,28 @@ private:
     std::minstd_rand random_;
     LyricCallback on_lyric_;
     FinishedCallback on_finished_;
+    std::mutex cache_jobs_mutex_;
+    std::deque<CacheJob> cache_jobs_;
+    std::optional<CacheJob> cache_active_job_;
+    bool cache_worker_running_ = false;
+    std::atomic<bool> cache_shutdown_{false};
 
     bool StartTasks(const std::shared_ptr<Session>& session);
     static void TaskEntry(void* arg);
     void NetTask(const std::shared_ptr<Session>& session);
     void ReadLocalFile(const std::shared_ptr<Session>& session);
+    bool WaitForBuffer(Session& session, bool initial);
     void DecodeTask(const std::shared_ptr<Session>& session);
-    std::unique_ptr<Http> OpenStream(Session& session, size_t offset, size_t& total_bytes);
-    bool WriteToBuffer(Session& session, const char* data, size_t size);
+    std::unique_ptr<Http> OpenStream(Session& session, size_t offset, size_t& total_bytes,
+                                     int connection_id = kMusicStreamConnectId,
+                                     const std::function<bool()>& allowed = {});
+    void QueueCacheJob(CacheJob job);
+    static void CacheTaskEntry(void* arg);
+    void CacheTask();
+    bool CanDownloadCache() const;
+    bool IsForegroundCacheJob(const CacheJob& job) const;
+    bool IsActiveCacheJob(const MusicTrack& track, const std::string& base, const std::string& root);
+    size_t WriteToBuffer(Session& session, const char* data, size_t size);
     bool PushFrame(Session& session, std::vector<int16_t>& pcm, uint32_t position_ms);
     void LoadLyrics(const std::shared_ptr<Session>& session);
     void CheckFinished(const std::shared_ptr<Session>& session);

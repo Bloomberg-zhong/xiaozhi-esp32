@@ -112,8 +112,8 @@ MusicTrack LocalTrackFromPath(const FavoriteEntry& entry) {
     return track;
 }
 
-// Finds songs on the SD card, or online when `source` names a catalog (or is
-// empty and a music source is configured).
+// A default song query prefers stored SD tracks, then searches online. An
+// explicit source or an empty query keeps its requested catalog behavior.
 struct SearchOutcome {
     std::vector<MusicTrack> tracks;
     std::string error;
@@ -124,9 +124,10 @@ SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const s
                           int limit) {
     SearchOutcome outcome;
     auto online = player.GetSource();
+    const std::string root = player.GetLocalRoot();
     const bool want_local = source == "sdcard" || source == "local" || (source.empty() && !online);
-    if (want_local) {
-        const std::string root = player.GetLocalRoot();
+    const bool prefer_local = source.empty() && !query.empty() && !root.empty();
+    if (want_local || prefer_local) {
         if (root.empty()) {
             outcome.error =
                 online ? "No SD card with music is available"
@@ -142,10 +143,13 @@ SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const s
             outcome.tracks.resize(limit);
         }
         outcome.ok = !outcome.tracks.empty();
-        if (!outcome.ok) {
-            outcome.error = "No matching music files on the SD card";
+        if (outcome.ok) {
+            return outcome;
         }
-        return outcome;
+        if (want_local) {
+            outcome.error = "No matching music files on the SD card";
+            return outcome;
+        }
     }
     if (!online) {
         outcome.error = "No online music source is configured";

@@ -9,9 +9,10 @@
 //
 //   GET {base}/search?q=<query>&limit=<n>[&source=<catalog>]
 //   -> {"tracks":[{"id","title","artist","album","duration_ms","url","lyric_url",
-//                  "lyric","source","live"}]}
+//                  "cover_url","lyric","source","live"}]}
 //   GET {base}/stream/<id>    audio of a song, `id` percent-encoded
 //   GET {base}/lyrics/<id>    LRC text, 404 without lyrics
+//   GET {base}/cover/<id>?size=128  bounded baseline JPEG, 404 without artwork
 //
 // scripts/music_server implements it on top of several free catalogs.
 class HttpApiSource : public MusicSource {

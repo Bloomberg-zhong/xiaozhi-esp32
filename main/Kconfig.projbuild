@@ -991,6 +991,17 @@ config USE_SERVER_AEC
     help
         To work perperly, server-side AEC requires server support
 
+config FORCE_AUTO_STOP_LISTENING
+    bool "Use Turn-Based Conversations With AEC"
+    default n
+    depends on USE_DEVICE_AEC || USE_SERVER_AEC
+    help
+        Keep wake-word interruption active during spoken replies, but resume
+        voice uplink only after playback drains. Enable this on boards where
+        residual acoustic echo can be recognized as user speech despite AEC.
+        Use speech-recognition AEC with linear echo filtering so near-end wake
+        speech remains detectable during playback. Other boards keep defaults.
+
 config USE_AUDIO_DEBUGGER
     bool "Enable Audio Debugger"
     default n

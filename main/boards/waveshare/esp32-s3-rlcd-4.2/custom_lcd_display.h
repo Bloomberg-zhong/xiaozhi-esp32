@@ -3,9 +3,13 @@
 
 #include <driver/gpio.h>
 
+#include <array>
 #include <atomic>
+#include <ctime>
 
+#include "dashboard_model.h"
 #include "lcd_display.h"
+#include "music_cover_loader.h"
 
 enum ColorSelection { ColorBlack = 0, ColorWhite = 0xff };
 
@@ -19,6 +23,7 @@ typedef struct {
 
 class CustomLcdDisplay : public LcdDisplay {
 private:
+    bool ShouldShowUsbPowerIcon() const override;
     esp_lcd_panel_io_handle_t io_handle = NULL;
     uint32_t i2c_data_pdMS_TICKS = 0;
     uint32_t i2c_done_pdMS_TICKS = 0;
@@ -45,7 +50,46 @@ private:
     static bool OnColorTransferDone(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t* event_data, void* user_ctx);
 
+    lv_obj_t* assistant_page_ = nullptr;
+    lv_obj_t* dashboard_page_ = nullptr;
+    lv_obj_t* calendar_page_ = nullptr;
+    lv_obj_t* dashboard_time_label_ = nullptr;
+    lv_obj_t* dashboard_date_label_ = nullptr;
+    lv_obj_t* dashboard_city_label_ = nullptr;
+    lv_obj_t* dashboard_weather_label_ = nullptr;
+    lv_obj_t* dashboard_outdoor_label_ = nullptr;
+    lv_obj_t* dashboard_updated_label_ = nullptr;
+    lv_obj_t* dashboard_room_label_ = nullptr;
+    lv_obj_t* dashboard_memo_label_ = nullptr;
+    std::array<lv_obj_t*, 2> dashboard_reminder_labels_{};
+    lv_obj_t* dashboard_ai_label_ = nullptr;
+    lv_obj_t* dashboard_controls_label_ = nullptr;
+    lv_obj_t* battery_percentage_label_ = nullptr;
+    lv_obj_t* calendar_title_label_ = nullptr;
+    lv_obj_t* calendar_lunar_label_ = nullptr;
+    lv_obj_t* calendar_ai_label_ = nullptr;
+    std::array<lv_obj_t*, 42> calendar_day_labels_{};
+    rlcd_dashboard::PageRouter page_router_;
+    std::atomic<rlcd_dashboard::DashboardPage> active_page_{rlcd_dashboard::DashboardPage::kHome};
+    bool active_page_initialized_ = false;
+    int calendar_month_offset_ = 0;
+    int calendar_stamp_ = -1;
+    std::string active_reminder_text_;
+    time_t active_reminder_until_ = 0;
+    void WrapAssistantUI();
+    void SetupBatteryPercentageUI();
+    void RefreshBatteryPercentage(bool available, int level);
+    void SetupDashboardUI();
+    void SetupCalendarUI();
+    void ShowPageLocked(rlcd_dashboard::DashboardPage page);
+    void RefreshDashboard();
+
 #if CONFIG_USE_MUSIC_PLAYER
+    std::unique_ptr<MusicCoverLoader> music_cover_loader_;
+    std::shared_ptr<int> music_cover_lifetime_ = std::make_shared<int>(0);
+    std::shared_ptr<LvglAllocatedImage> music_cover_image_;
+    lv_obj_t* music_cover_obj_ = nullptr;
+    lv_obj_t* music_cover_placeholder_ = nullptr;
     lv_obj_t* music_page_ = nullptr;
     lv_obj_t* music_title_label_ = nullptr;
     lv_obj_t* music_artist_label_ = nullptr;
@@ -70,6 +114,9 @@ public:
     void SetChatMessage(const char* role, const char* content) override;
     void SetEmotion(const char* emotion) override;
     void UpdateStatusBar(bool update_all = false) override;
+    void RequestPage(rlcd_dashboard::DashboardPage page);
+    void ToggleHomeCalendarPage();
+    void BrowseCalendarMonth(int direction);
     // Switches the ST7305 controller between high power mode (fast refresh)
     // and low power mode (slow refresh, a fraction of the panel current).
     virtual void SetPowerSaveMode(bool on) override;

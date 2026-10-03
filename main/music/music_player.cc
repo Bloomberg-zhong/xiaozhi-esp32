@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "application.h"
 #include "audio_codec.h"
 #include "audio_service.h"
 #include "board.h"
@@ -20,6 +21,7 @@
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 #include "local_music.h"
+#include "music_cache.h"
 #include "music_util.h"
 
 #define TAG "MusicPlayer"
@@ -35,8 +37,10 @@ constexpr size_t kFallbackBufferSize = 32 * 1024;
 constexpr size_t kNetChunkSize = 2048;
 constexpr size_t kDecodeInputSize = 4096;
 constexpr size_t kPrebufferBytes = 16 * 1024;
-constexpr size_t kLyricsAfterBytes = 32 * 1024;
+constexpr size_t kNetworkPrebufferBytes = 128 * 1024;
+constexpr size_t kNetworkRebufferBytes = 64 * 1024;
 constexpr int kStreamTimeoutMs = 10000;
+constexpr int kReadPollMs = 1000;
 constexpr int kMaxRedirects = 3;
 constexpr int kMaxStreamRetries = 3;
 constexpr int kMaxDecodeErrors = 8;
@@ -107,7 +111,14 @@ struct MusicPlayer::Session {
     uint32_t id = 0;
     MusicTrack track;
     std::shared_ptr<MusicSource> source;
+    std::string local_root;
+    std::shared_ptr<MusicCache::Entry> cache_entry;
     StreamBufferHandle_t buffer = nullptr;
+    StaticStreamBuffer_t buffer_control = {};
+    uint8_t* buffer_storage = nullptr;
+    size_t buffer_capacity = 0;
+    std::atomic<bool> local_stream{false};
+    bool live_stream = false;
     std::atomic<bool> cancelled{false};
     std::atomic<bool> paused{false};
     std::atomic<bool> net_done{false};
@@ -120,8 +131,12 @@ struct MusicPlayer::Session {
 
     ~Session() {
         if (buffer != nullptr) {
-            vStreamBufferDeleteWithCaps(buffer);
+            // This is a statically created stream: delete its RTOS state before
+            // releasing our storage. IDF 6.0.2's DeleteWithCaps incorrectly
+            // calls vSemaphoreDelete for streams and double-frees the control.
+            vStreamBufferDelete(buffer);
         }
+        heap_caps_free(buffer_storage);
     }
 };
 
@@ -134,7 +149,20 @@ struct MusicPlayer::TaskContext {
 MusicPlayer::MusicPlayer(AudioService& audio_service)
     : audio_service_(audio_service), random_(esp_random()) {}
 
-MusicPlayer::~MusicPlayer() { Stop(); }
+MusicPlayer::~MusicPlayer() {
+    cache_shutdown_ = true;
+    Stop();
+    // The worker never accesses a destroyed MusicPlayer. A blocked HTTP read
+    // is bounded by kReadPollMs; connect/header operations use kStreamTimeoutMs.
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(cache_jobs_mutex_);
+            if (!cache_worker_running_)
+                break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 
 void MusicPlayer::SetCallbacks(LyricCallback on_lyric, FinishedCallback on_finished) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -311,6 +339,7 @@ uint32_t MusicPlayer::Play() {
             session->id = kSessionIdFlag | (++session_counter_ & ~kSessionIdFlag);
             session->track = queue_[index_];
             session->source = source_;
+            session->local_root = local_root_;
             if (!StartTasks(session)) {
                 return 0;
             }
@@ -484,16 +513,28 @@ cJSON* MusicPlayer::GetStatusJson() const {
 }
 
 bool MusicPlayer::StartTasks(const std::shared_ptr<Session>& session) {
-    session->buffer =
-        xStreamBufferCreateWithCaps(kStreamBufferSize, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (session->buffer == nullptr) {
-        session->buffer = xStreamBufferCreateWithCaps(kFallbackBufferSize, 1,
-                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t buffer_size = kStreamBufferSize;
+    session->buffer_storage =
+        static_cast<uint8_t*>(heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (session->buffer_storage == nullptr) {
+        buffer_size = kFallbackBufferSize;
+        session->buffer_storage = static_cast<uint8_t*>(
+            heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
-    if (session->buffer == nullptr) {
+    if (session->buffer_storage == nullptr) {
         ESP_LOGE(TAG, "Failed to allocate the stream buffer");
         return false;
     }
+    session->buffer = xStreamBufferCreateStatic(buffer_size, 1, session->buffer_storage,
+                                                &session->buffer_control);
+    if (session->buffer == nullptr) {
+        ESP_LOGE(TAG, "Failed to create the stream buffer");
+        return false;
+    }
+    // Static stream buffers keep one byte empty to distinguish full from empty.
+    session->buffer_capacity = buffer_size - 1;
+    session->local_stream = IsLocalMusicPath(session->track.stream_url);
+    session->live_stream = session->track.live;
 
     auto* net_context = new TaskContext{this, session, false};
     if (xTaskCreate(TaskEntry, "music_net", kNetTaskStackSize, net_context, kNetTaskPriority,
@@ -524,16 +565,18 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
-                                              size_t& total_bytes) {
+std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset, size_t& total_bytes,
+                                              int connection_id,
+                                              const std::function<bool()>& allowed) {
+    const auto continuing = [&] { return !session.cancelled && (!allowed || allowed()); };
     auto network = Board::GetInstance().GetNetwork();
     std::string url = session.track.stream_url;
-    for (int redirect = 0; redirect <= kMaxRedirects && !session.cancelled; ++redirect) {
+    for (int redirect = 0; redirect <= kMaxRedirects && continuing(); ++redirect) {
         if (!IsHttpUrl(url)) {
             ESP_LOGE(TAG, "Invalid stream URL");
             return nullptr;
         }
-        auto http = network->CreateHttp(kMusicStreamConnectId);
+        auto http = network->CreateHttp(connection_id);
         if (!http) {
             return nullptr;
         }
@@ -556,6 +599,10 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
             return nullptr;
         }
         const int status = *status_result;
+        if (!continuing()) {
+            http->Close();
+            return nullptr;
+        }
         if (status >= 300 && status < 400) {
             std::string location = http->GetResponseHeader("Location");
             http->Close();
@@ -567,7 +614,18 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
         }
         const size_t body_length = http->GetBodyLength();
         if (status == 206 && offset > 0) {
-            total_bytes = body_length > 0 ? offset + body_length : 0;
+            unsigned long long start = 0, end = 0, length = 0;
+            char tail = 0;
+            const auto range = http->GetResponseHeader("Content-Range");
+            if (std::sscanf(range.c_str(), "bytes %llu-%llu/%llu%c", &start, &end, &length,
+                            &tail) != 3 ||
+                start != offset || end < start || length <= end || length > SIZE_MAX ||
+                (body_length > 0 && body_length != end - start + 1)) {
+                ESP_LOGW(TAG, "Invalid music HTTP Content-Range");
+                http->Close();
+                return nullptr;
+            }
+            total_bytes = static_cast<size_t>(length);
             return http;
         }
         if (status < 200 || status >= 300) {
@@ -584,7 +642,13 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
         // The server ignored the Range header: skip what was already buffered.
         char discard[512];
         size_t skipped = 0;
-        while (skipped < offset && !session.cancelled) {
+        http->SetTimeout(kReadPollMs);
+        const TickType_t started = xTaskGetTickCount();
+        while (skipped < offset && continuing()) {
+            if (xTaskGetTickCount() - started >= pdMS_TO_TICKS(kStreamTimeoutMs)) {
+                http->Close();
+                return nullptr;
+            }
             auto read = http->Read(discard, std::min(sizeof(discard), offset - skipped));
             int size = read ? *read : -1;
             if (size <= 0) {
@@ -593,20 +657,24 @@ std::unique_ptr<Http> MusicPlayer::OpenStream(Session& session, size_t offset,
             }
             skipped += size;
         }
+        if (skipped != offset || !continuing()) {
+            http->Close();
+            return nullptr;
+        }
         return http;
     }
     return nullptr;
 }
 
-bool MusicPlayer::WriteToBuffer(Session& session, const char* data, size_t size) {
+size_t MusicPlayer::WriteToBuffer(Session& session, const char* data, size_t size) {
     size_t sent = 0;
     while (sent < size) {
-        if (session.cancelled) {
-            return false;
+        if (session.cancelled || session.paused) {
+            break;
         }
         sent += xStreamBufferSend(session.buffer, data + sent, size - sent, pdMS_TO_TICKS(100));
     }
-    return true;
+    return sent;
 }
 
 void MusicPlayer::LoadLyrics(const std::shared_ptr<Session>& session) {
@@ -620,7 +688,18 @@ void MusicPlayer::LoadLyrics(const std::shared_ptr<Session>& session) {
     } else if (!track.lyric_text.empty()) {
         lines = ParseLrc(track.lyric_text);
     } else if (session->source && !IsLocalMusicPath(track.stream_url)) {
-        lines = session->source->FetchLyrics(track);
+        MusicCache cache(session->local_root);
+        std::string text;
+        const auto& base = session->source->base_url();
+        if (cache.ReadLyrics(track, base, text)) {
+            lines = ParseLrc(text);
+        }
+        if (lines.empty()) {
+            lines = session->source->FetchLyrics(track);
+            if (!lines.empty()) {
+                cache.StoreLyrics(track, base, lines);
+            }
+        }
     }
     if (lines.empty()) {
         return;
@@ -634,12 +713,19 @@ void MusicPlayer::LoadLyrics(const std::shared_ptr<Session>& session) {
 }
 
 void MusicPlayer::ReadLocalFile(const std::shared_ptr<Session>& session) {
+    session->local_stream = true;
     FILE* file = std::fopen(session->track.stream_url.c_str(), "rb");
     if (file == nullptr) {
         std::lock_guard<std::mutex> lock(session->mutex);
         session->error = "cannot open the music file";
         session->net_failed = true;
         return;
+    }
+    ESP_LOGI(TAG, "Reading SD song: %s", session->track.stream_url.c_str());
+    // Local lyrics are ready before audio buffering can wait for playback to
+    // consume a whole song. LoadLyrics never fetches from the network here.
+    if (!session->cancelled) {
+        LoadLyrics(session);
     }
     std::vector<char> chunk(kNetChunkSize);
     bool failed = false;
@@ -649,8 +735,12 @@ void MusicPlayer::ReadLocalFile(const std::shared_ptr<Session>& session) {
             failed = std::ferror(file) != 0;
             break;
         }
-        if (!WriteToBuffer(*session, chunk.data(), size)) {
-            break;
+        size_t sent = 0;
+        while (sent < size && !session->cancelled) {
+            sent += WriteToBuffer(*session, chunk.data() + sent, size - sent);
+            if (sent < size && !session->cancelled) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
         }
     }
     std::fclose(file);
@@ -660,32 +750,141 @@ void MusicPlayer::ReadLocalFile(const std::shared_ptr<Session>& session) {
         session->net_failed = true;
         return;
     }
-    if (!session->cancelled) {
-        LoadLyrics(session);
-    }
     session->net_done = true;
 }
 
 void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
+    MusicCache cache(session->local_root);
     if (IsLocalMusicPath(session->track.stream_url)) {
+        session->cache_entry = cache.PinLocal(session->track.stream_url);
         ReadLocalFile(session);
         return;
     }
+    const std::string source_base = session->source ? session->source->base_url() : "";
+    // A previous reader or the background worker must relinquish this song
+    // before the foreground opens its own HTTP request.
+    for (int waited = 0; cache.IsWriting(session->track, source_base) ||
+                         IsActiveCacheJob(session->track, source_base, session->local_root);
+         ++waited) {
+        if (session->cancelled)
+            return;
+        if (waited >= 750) {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            session->error = "the song cache is still busy";
+            session->net_failed = true;
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (auto entry = cache.Find(session->track, source_base)) {
+        session->cache_entry = entry;
+        session->track = entry->track;
+        ESP_LOGI(TAG, "Playing cached song: %s", session->track.title.c_str());
+        ReadLocalFile(session);
+        return;
+    }
+    // Prepare optional metadata before audio starts. FetchLyrics can wait for
+    // an HTTP timeout; doing this inside the body loop starves the decoder.
+    if (!session->track.live && !session->cancelled) {
+        ESP_LOGI(TAG, "Preparing music lyrics before audio buffering");
+        LoadLyrics(session);
+    }
+    if (session->cancelled) {
+        return;
+    }
+    if (session->source && !session->local_root.empty()) {
+        for (auto track : cache.Pending(source_base)) {
+            if (MusicCache::SameIdentity(track, source_base, session->track, source_base))
+                continue;  // This reader owns its resume, never queue a second download.
+            auto rebuilt = session->source->BuildTrack(track.id, track.title, track.artist, false);
+            rebuilt.album = track.album;
+            rebuilt.provider = track.provider;
+            rebuilt.duration_ms = track.duration_ms;
+            rebuilt.lyric_text = track.lyric_text;
+            QueueCacheJob({std::move(rebuilt), session->source, session->local_root});
+        }
+    }
+    std::unique_ptr<MusicCache::Writer> cache_writer;
+    bool cache_attempted = false;
     std::vector<char> chunk(kNetChunkSize);
     size_t received = 0;
     size_t total = 0;
     int failures = 0;
-    bool lyrics_loaded = false;
     bool finished = false;
     // A live stream has no end and cannot be resumed at an offset: a dropped
     // connection is simply reopened.
     const bool live = session->track.live;
 
     while (!session->cancelled && !finished) {
+        if (session->paused) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        bool suspended = false;
         auto http = OpenStream(*session, live ? 0 : received, total);
         if (http) {
+            if (!cache_attempted && !live) {
+                cache_attempted = true;
+                cache_writer = cache.Begin(session->track, source_base, total);
+                if (!cache_writer && !session->local_root.empty()) {
+                    ESP_LOGW(
+                        TAG,
+                        "SD cache unavailable (unknown length, space or active job); streaming");
+                }
+                if (cache_writer && cache_writer->offset() > 0) {
+                    // Feed the validated prefix from SD and request only the
+                    // missing suffix, instead of downloading the old bytes again.
+                    http->Close();
+                    FILE* prefix = std::fopen(cache_writer->PartialPath().c_str(), "rb");
+                    bool ok = prefix != nullptr;
+                    const size_t cached = cache_writer->offset();
+                    while (ok && received < cached && !session->cancelled) {
+                        if (session->paused) {
+                            vTaskDelay(pdMS_TO_TICKS(20));
+                            continue;
+                        }
+                        // WriteToBuffer may return only part of a chunk when
+                        // pause arrives; seek by consumed bytes on every read.
+                        if (std::fseek(prefix, static_cast<long>(received), SEEK_SET) != 0) {
+                            ok = false;
+                            break;
+                        }
+                        const size_t size = std::fread(
+                            chunk.data(), 1, std::min(chunk.size(), cached - received), prefix);
+                        if (size == 0) {
+                            ok = false;
+                            break;
+                        }
+                        received += WriteToBuffer(*session, chunk.data(), size);
+                    }
+                    if (prefix)
+                        std::fclose(prefix);
+                    if (!ok) {
+                        std::lock_guard<std::mutex> lock(session->mutex);
+                        session->error = "cannot read the cached music prefix";
+                        session->net_failed = true;
+                        return;
+                    }
+                    ESP_LOGI(TAG, "Reused SD prefix: %u bytes", static_cast<unsigned>(received));
+                    finished = received == total;
+                    continue;
+                }
+            }
+            // Keep connect/header timeouts long, but bound a blocked body read
+            // so pause/stop can release RX resources promptly.
+            http->SetTimeout(kReadPollMs);
+            int read_timeouts = 0;
             while (!session->cancelled) {
+                if (session->paused) {
+                    suspended = true;
+                    break;
+                }
                 auto read = http->Read(chunk.data(), chunk.size());
+                if (!read && read.error().code == NetworkErrc::Timeout &&
+                    ++read_timeouts < kStreamTimeoutMs / kReadPollMs) {
+                    continue;
+                }
+                read_timeouts = 0;
                 int size = read ? *read : -1;
                 if (size < 0) {
                     break;
@@ -696,15 +895,22 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
                     break;
                 }
                 failures = 0;
-                if (!WriteToBuffer(*session, chunk.data(), size)) {
-                    break;
+                const size_t written = WriteToBuffer(*session, chunk.data(), size);
+                if (cache_writer && written > 0) {
+                    const size_t cached = cache_writer->offset();
+                    const size_t skip =
+                        cached > received ? std::min(written, cached - received) : 0;
+                    if (skip < written &&
+                        !cache_writer->Append(received + skip, chunk.data() + skip,
+                                              written - skip)) {
+                        ESP_LOGW(TAG, "SD cache write failed; streaming continues");
+                        cache_writer.reset();
+                    }
                 }
-                received += size;
-                if (!lyrics_loaded && !live && received >= kLyricsAfterBytes) {
-                    // Playback has started by now; the lyric request runs
-                    // while the stream buffer keeps the audio going.
-                    lyrics_loaded = true;
-                    LoadLyrics(session);
+                received += written;
+                if (written != static_cast<size_t>(size)) {
+                    suspended = !session->cancelled;
+                    break;
                 }
                 if (total > 0 && received >= total) {
                     finished = true;
@@ -716,11 +922,22 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
         if (finished || session->cancelled) {
             break;
         }
+        if (suspended || session->paused) {
+            // A paused TCP stream can retain all of a small board's Wi-Fi RX
+            // buffers and starve the conversation's UDP packets. Release the
+            // connection; retain the decoder/buffer and resume at bytes actually
+            // enqueued, including a partially written chunk.
+            ESP_LOGI(TAG, "Suspended music download at %u bytes", static_cast<unsigned>(received));
+            continue;
+        }
         if (++failures > kMaxStreamRetries) {
             std::lock_guard<std::mutex> lock(session->mutex);
             session->error =
                 received == 0 ? "cannot open the music stream" : "the music stream was interrupted";
             session->net_failed = true;
+            if (cache_writer && cache_writer->Suspend()) {
+                QueueCacheJob({session->track, session->source, session->local_root});
+            }
             return;
         }
         ESP_LOGW(TAG, "Reconnecting the music stream at %u bytes (attempt %d)",
@@ -728,10 +945,214 @@ void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
         vTaskDelay(pdMS_TO_TICKS(500 * failures));
     }
 
-    if (finished && !lyrics_loaded && !live && !session->cancelled) {
-        LoadLyrics(session);
+    if (cache_writer) {
+        if (finished && !session->cancelled) {
+            const bool saved = cache_writer->Finish();
+            ESP_LOGI(TAG, "SD cache complete: %s (%s)", session->track.title.c_str(),
+                     saved ? "saved" : "failed integrity or card write");
+            (void)saved;
+        } else {
+            const bool retained = cache_writer->Suspend();
+            ESP_LOGI(TAG, "SD cache queued for completion: %s (%s)", session->track.title.c_str(),
+                     retained ? "resumable partial"
+                              : "pending publication failed; recovery will be checked");
+            (void)retained;
+            QueueCacheJob({session->track, session->source, session->local_root});
+        }
     }
     session->net_done = true;
+}
+
+bool MusicPlayer::CanDownloadCache() const {
+    const auto state = Application::GetInstance().GetDeviceState();
+    if (cache_shutdown_ || (state != kDeviceStateIdle && state != kDeviceStatePlaying))
+        return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (session_ && session_->paused)
+        return false;
+    // Give the audible stream the Wi-Fi receive buffers and heap headroom.
+    // Complete old jobs once the foreground reader finishes or plays from SD.
+    return !session_ || session_->cancelled || session_->net_done ||
+           (!queue_.empty() && IsLocalMusicPath(queue_[index_].stream_url));
+}
+
+bool MusicPlayer::IsForegroundCacheJob(const CacheJob& job) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!session_ || session_->cancelled || queue_.empty() || session_->local_root != job.root)
+        return false;
+    const auto& current = queue_[index_];
+    const std::string current_base = session_->source ? session_->source->base_url() : "";
+    const std::string job_base = job.source ? job.source->base_url() : "";
+    return MusicCache::SameIdentity(current, current_base, job.track, job_base);
+}
+
+bool MusicPlayer::IsActiveCacheJob(const MusicTrack& track, const std::string& base,
+                                   const std::string& root) {
+    std::lock_guard<std::mutex> lock(cache_jobs_mutex_);
+    return cache_active_job_ && cache_active_job_->root == root &&
+           MusicCache::SameIdentity(
+               cache_active_job_->track,
+               cache_active_job_->source ? cache_active_job_->source->base_url() : "", track, base);
+}
+
+void MusicPlayer::QueueCacheJob(CacheJob job) {
+    if (cache_shutdown_ || job.root.empty() || job.track.live || !IsHttpUrl(job.track.stream_url)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(cache_jobs_mutex_);
+    auto same = [&job](const CacheJob& queued) {
+        return queued.root == job.root &&
+               MusicCache::SameIdentity(queued.track,
+                                        queued.source ? queued.source->base_url() : "", job.track,
+                                        job.source ? job.source->base_url() : "");
+    };
+    if (cache_active_job_ && same(*cache_active_job_) &&
+        MusicCache(job.root).IsWriting(job.track, job.source ? job.source->base_url() : ""))
+        return;
+    for (const auto& queued : cache_jobs_) {
+        if (same(queued)) {
+            return;
+        }
+    }
+    if (cache_jobs_.size() >= 32) {
+        ESP_LOGW(TAG, "SD cache backlog full; pending song retained on card");
+        return;
+    }
+    cache_jobs_.push_back(std::move(job));
+    if (!cache_worker_running_) {
+        cache_worker_running_ = true;
+        if (xTaskCreate(CacheTaskEntry, "music_cache", kNetTaskStackSize, this, 1, nullptr) !=
+            pdPASS) {
+            cache_worker_running_ = false;
+            ESP_LOGW(TAG, "Cannot start SD cache worker; pending songs retained on card");
+        }
+    }
+}
+
+void MusicPlayer::CacheTaskEntry(void* arg) {
+    static_cast<MusicPlayer*>(arg)->CacheTask();
+    vTaskDelete(nullptr);
+}
+
+void MusicPlayer::CacheTask() {
+    // Exactly one low-priority worker, one 2 KiB body buffer, and at most 32
+    // pending jobs. It releases HTTP during conversations, just like NetTask.
+    std::vector<char> chunk(kNetChunkSize);
+    while (!cache_shutdown_) {
+        CacheJob job;
+        {
+            std::lock_guard<std::mutex> lock(cache_jobs_mutex_);
+            cache_active_job_.reset();
+            if (cache_jobs_.empty()) {
+                cache_worker_running_ = false;
+                return;
+            }
+            job = std::move(cache_jobs_.front());
+            cache_jobs_.pop_front();
+            cache_active_job_ = job;
+        }
+        MusicCache cache(job.root);
+        const std::string base = job.source ? job.source->base_url() : "";
+        if (cache.Find(job.track, base))
+            continue;
+        if (IsForegroundCacheJob(job))
+            continue;
+        auto session = std::make_shared<Session>();
+        session->track = job.track;
+        session->source = job.source;
+        session->local_root = job.root;
+        std::unique_ptr<MusicCache::Writer> writer;
+        size_t offset = 0, total = 0;
+        int failures = 0;
+        bool complete = false;
+        while (!cache_shutdown_ && !complete) {
+            if (IsForegroundCacheJob(job))
+                break;
+            if (!CanDownloadCache()) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            // ID 8 is distinct from stream/API/weather/artwork modem channels.
+            auto http = OpenStream(*session, offset, total, 8, [&] {
+                return !cache_shutdown_ && CanDownloadCache() && !IsForegroundCacheJob(job);
+            });
+            if (http) {
+                if (IsForegroundCacheJob(job)) {
+                    http->Close();
+                    break;
+                }
+                if (!writer) {
+                    writer = cache.Begin(job.track, base, total);
+                    if (!writer) {
+                        http->Close();
+                        break;
+                    }
+                    if (writer->offset() != offset) {
+                        offset = writer->offset();
+                        http->Close();
+                        if (offset == total) {
+                            complete = true;
+                            break;  // All bytes are already validated on SD; no Range past EOF.
+                        }
+                        continue;  // Reopen at the validated persistent partial offset.
+                    }
+                }
+                http->SetTimeout(kReadPollMs);
+                int timeouts = 0;
+                while (!cache_shutdown_ && CanDownloadCache() && !IsForegroundCacheJob(job)) {
+                    auto read = http->Read(chunk.data(), chunk.size());
+                    if (!read && read.error().code == NetworkErrc::Timeout &&
+                        ++timeouts < kStreamTimeoutMs / kReadPollMs)
+                        continue;
+                    timeouts = 0;
+                    int size = read ? *read : -1;
+                    if (size <= 0) {
+                        complete = size == 0 && total > 0 && offset == total;
+                        break;
+                    }
+                    if (!writer->Append(offset, chunk.data(), size))
+                        break;
+                    offset += size;
+                    failures = 0;
+                    if (total > 0 && offset == total) {
+                        complete = true;
+                        break;
+                    }
+                }
+                http->Close();
+            }
+            if (complete || cache_shutdown_)
+                break;
+            if (IsForegroundCacheJob(job))
+                break;
+            if (!CanDownloadCache())
+                continue;
+            if (++failures > kMaxStreamRetries)
+                break;
+            vTaskDelay(pdMS_TO_TICKS(500 * failures));
+        }
+        if (!writer) {
+            ESP_LOGW(TAG, "Background SD cache unavailable: %s (network, card or space)",
+                     job.track.title.c_str());
+        }
+        if (writer) {
+            if (complete) {
+                const bool saved = writer->Finish();
+                ESP_LOGI(TAG, "Background SD cache: %s (%s)", job.track.title.c_str(),
+                         saved ? "saved" : "failed integrity or space");
+                (void)saved;
+            } else {
+                const bool retained = writer->Suspend();
+                ESP_LOGW(TAG, "Background SD cache unfinished: %s (%s)", job.track.title.c_str(),
+                         retained ? "pending on card"
+                                  : "pending publication failed; recovery will be checked");
+                (void)retained;
+            }
+        }
+    }
+    std::lock_guard<std::mutex> lock(cache_jobs_mutex_);
+    cache_active_job_.reset();
+    cache_worker_running_ = false;
 }
 
 bool MusicPlayer::PushFrame(Session& session, std::vector<int16_t>& pcm, uint32_t position_ms) {
@@ -750,17 +1171,43 @@ bool MusicPlayer::PushFrame(Session& session, std::vector<int16_t>& pcm, uint32_
     return false;
 }
 
+bool MusicPlayer::WaitForBuffer(Session& session, bool initial) {
+    const TickType_t started = xTaskGetTickCount();
+    if (!initial) {
+        ESP_LOGW(TAG, "Music stream underrun; refilling audio buffer");
+    }
+    while (!session.cancelled && !session.net_done && !session.net_failed) {
+        // Cache lookup can switch an online session to a local reader while we
+        // wait. Keep card playback and live radio responsive, and reserve one
+        // writer chunk even when PSRAM allocation fell back to a small buffer.
+        const size_t desired = session.local_stream || session.live_stream
+                                   ? kPrebufferBytes
+                                   : (initial ? kNetworkPrebufferBytes : kNetworkRebufferBytes);
+        const size_t margin = std::min(kNetChunkSize, session.buffer_capacity / 4);
+        const size_t target = std::min(desired, session.buffer_capacity - margin);
+        if (!session.paused && xStreamBufferBytesAvailable(session.buffer) >= target) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (session.cancelled) {
+        return false;
+    }
+    const auto elapsed_ms = (xTaskGetTickCount() - started) * portTICK_PERIOD_MS;
+    ESP_LOGI(TAG, "%s audio buffer: %u bytes after %u ms", initial ? "Initial" : "Recovered",
+             static_cast<unsigned>(xStreamBufferBytesAvailable(session.buffer)),
+             static_cast<unsigned>(elapsed_ms));
+    (void)elapsed_ms;
+    return true;
+}
+
 void MusicPlayer::DecodeTask(const std::shared_ptr<Session>& session) {
     auto* codec = Board::GetInstance().GetAudioCodec();
     const int output_rate = codec->output_sample_rate();
     const size_t frame_samples = static_cast<size_t>(output_rate) * kOutputFrameMs / 1000;
 
-    // Wait for enough data to survive the first network hiccups.
-    while (!session->cancelled && !session->net_done && !session->net_failed &&
-           xStreamBufferBytesAvailable(session->buffer) < kPrebufferBytes) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    if (session->cancelled) {
+    // Start ordinary online tracks with a useful reserve against short stalls.
+    if (!WaitForBuffer(*session, true)) {
         return;
     }
 
@@ -848,7 +1295,13 @@ void MusicPlayer::DecodeTask(const std::shared_ptr<Session>& session) {
                 if (session->net_done) {
                     end_of_stream = true;
                 } else if (input_length == 0 || need_more_data) {
-                    continue;  // Underrun: wait for the network
+                    // Preserve the parser, its partial input and pending PCM.
+                    // Resuming on every small packet would turn a single stall
+                    // into repeated audible gaps.
+                    if (!WaitForBuffer(*session, false)) {
+                        break;
+                    }
+                    continue;
                 }
             }
         }

@@ -49,6 +49,7 @@ if(CONFIG_USE_MUSIC_PLAYER)
     list(APPEND SOURCES
         "music/lrc_parser.cc"
         "music/local_music.cc"
+        "music/music_cache.cc"
         "music/favorites.cc"
         "music/music_util.cc"
         "music/music_source.cc"
@@ -1092,6 +1093,11 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
+# IDF expands requirements before board Kconfig symbols are loaded. The RLCD
+# uses the S3 USB monitor and synchronous HTTP; gate dependencies by target.
+if(IDF_TARGET STREQUAL "esp32s3")
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_driver_usb_serial_jtag esp_http_client)
+endif()
 if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         m5stack__m5pm1

@@ -1,7 +1,8 @@
 # XiaoZhi music server
 
 One HTTP API in front of several **free** music catalogs, so the device only
-needs one address: your domain. Standard library only, Python 3.9+.
+needs one address: your domain. Python 3.9+; audio and search use the standard
+library, while optional Pillow normalizes album artwork.
 
 | Catalog | What it is | Needs |
 |---|---|---|
@@ -46,12 +47,33 @@ by the catalog. Stream requests resolve through the gateway each time; Range
 requests and catalog lyrics are forwarded. The adapter does not unlock tracks
 that the upstream source refuses to serve.
 
+Album artwork from the gateway's `cover_url`, `cover`, `picUrl`, or album
+`picUrl` metadata is fetched through the same SSRF checks as audio. Search
+responses expose only this server's `/cover` address.
+For a saved track ID after metadata expiry or a server restart, a cover request
+can recover the original catalog entry using explicit title/artist lyric tags.
+Only a result with the same source and song ID is accepted; missing tags or an
+unmatched ID keep the cover unavailable. This lookup runs only for artwork and
+does not add catalog requests to audio startup.
+
 ## Try it
 
 ```bash
 python3 scripts/music_server/music_server.py --music-dir ~/Music   # local files + archive + radio
 curl "http://127.0.0.1:8090/search?q=piano&limit=3"
 ```
+
+For covers in a direct Python deployment, install the optional dependency into
+that server's virtual environment:
+
+```bash
+python3 -m pip install -r scripts/music_server/requirements-artwork.txt
+```
+
+The Docker image includes it.
+Search and audio remain available without Pillow; cover requests then return
+`503`. Local folders support a matching song `.jpg`/`.jpeg`/`.png`/`.webp`, or
+`cover`, `folder`, or `front` files with those extensions.
 
 ## Put it on your domain (HTTPS)
 
@@ -87,11 +109,17 @@ All requests except `/health` need `Authorization: Bearer <key>` (or
 | `GET /track?id=` | one track |
 | `GET /stream/<id>` | audio, `Range` supported, always proxied by this server |
 | `GET /lyrics/<id>` | LRC text, `404` without lyrics |
+| `GET /cover/<id>?size=128` | album cover as baseline RGB JPEG, longest edge at most 128 pixels, at most 32 KiB; `404` without artwork |
 
-A track is `{"id", "title", "artist", "album", "duration_ms", "url", "lyric_url", "source", "live"}`.
+A track is `{"id", "title", "artist", "album", "duration_ms", "url", "lyric_url", "cover_url", "source", "live"}`.
 `id` is `<catalog>:<catalog id>` and `url` is `/stream/<percent-encoded id>`, so
 a client can rebuild the stream address of a saved favorite from the id alone.
 Errors are `{"error": "..."}`.
+`cover_url` is optional and points to `/cover/<percent-encoded id>?size=128`;
+original upstream artwork addresses and Subsonic credentials stay on the server.
+The cover route requires the same API key as search and audio. Images retain
+their aspect ratio; requests for larger sizes are capped at 128. Input images
+are limited to 2 MiB and 16 million pixels.
 
 ## Safety
 
@@ -109,6 +137,21 @@ Errors are `{"error": "..."}`.
 complete it: `XZ_MUSIC_API_KEY`, `JAMENDO_CLIENT_ID`, `MUSIC_DIR`,
 `SUBSONIC_URL`/`SUBSONIC_USER`/`SUBSONIC_PASSWORD`. A catalog is used only when
 its required settings are present; `"enabled": false` turns one off.
+
+When a LAN proxy uses Fake-IP DNS, a public artwork CDN may resolve to a reserved
+address such as `198.18.x.x`, which the default SSRF guard rejects. After checking
+the real CDN belongs to your chosen catalog, configure only its exact hostname:
+
+```json
+{"trusted_artwork_hosts": ["img1.kuwo.cn", "img2.kuwo.cn", "img3.kuwo.cn", "img4.kuwo.cn"]}
+```
+
+The default is an empty list. Entries are hostnames without a scheme, port,
+wildcard, or path; subdomains are not included automatically. This exception
+applies only to artwork downloads. Audio, search, and lyrics retain their
+existing host checks, and artwork redirects to any other untrusted private or
+reserved host remain blocked. Keep `allow_private_hosts` disabled when using
+this narrow exception. Restart the server after updating its configuration.
 
 ## Adding a catalog
 

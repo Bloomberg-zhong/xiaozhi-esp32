@@ -8,8 +8,8 @@ only needs a single address: your domain.
     python3 scripts/music_server/music_server.py --config config.json
     python3 scripts/music_server/music_server.py --music-dir ~/Music      # quick start
 
-Only the Python standard library is needed. See README.md for deployment with
-HTTPS on your own domain and docs/music-player.md for the API.
+Audio/search need only the Python standard library; album covers optionally use
+Pillow. See README.md for HTTPS deployment and docs/music-player.md for the API.
 """
 
 import argparse

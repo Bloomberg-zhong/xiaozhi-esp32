@@ -6,7 +6,7 @@ client_id and put it in the config ("client_id") or JAMENDO_CLIENT_ID.
 
 from typing import List
 
-from ..models import NotFound, ProviderError, Track
+from ..models import NotFound, ProviderError, Track, artwork_url
 from .base import Provider
 
 
@@ -44,6 +44,7 @@ class JamendoProvider(Provider):
             duration_ms=int(float(item.get("duration") or 0) * 1000),
             provider=self.name,
             stream_url=item.get("audio", ""),
+            cover_url=artwork_url(item.get("album_image") or item.get("image"), self.base_url),
         )
 
     def search(self, query: str, limit: int) -> List[Track]:

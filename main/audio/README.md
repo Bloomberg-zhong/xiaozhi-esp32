@@ -20,7 +20,10 @@ MultiNet wake words, AFE fetch output is passed to `CustomWakeWord`; MultiNet is
 not created on the smaller targets.
 
 The AFE configuration currently uses `FD_LOW_COST` AEC with
-`AEC_NLP_LEVEL_VERYAGGR`. WebRTC/NSNet noise suppression is intentionally
+`AEC_NLP_LEVEL_VERYAGGR`. Builds with `CONFIG_FORCE_AUTO_STOP_LISTENING` use
+`AEC_MODE_SR_LOW_COST` with linear echo filtering: spoken replies are isolated
+from voice uplink until the playback queue drains, while omitting FD nonlinear
+suppression preserves near-end wake phrases during playback. WebRTC/NSNet noise suppression is intentionally
 disabled because the project does not ship an NSNet model.
 
 When wake-word audio upload is enabled, the most recent two seconds of PCM are

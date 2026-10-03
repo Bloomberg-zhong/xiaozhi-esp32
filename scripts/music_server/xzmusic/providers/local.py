@@ -10,7 +10,7 @@ import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
-from ..models import NotFound, Track
+from ..models import NotFound, ProviderError, Track
 from .base import Provider, StreamResponse
 
 AUDIO_TYPES = {
@@ -121,6 +121,7 @@ class LocalProvider(Provider):
         return len(self._entries())
 
     def _to_track(self, entry: dict) -> Track:
+        cover = self._cover_path(entry["path"])
         return Track(
             id="local:" + entry["id"],
             title=entry["title"],
@@ -128,7 +129,36 @@ class LocalProvider(Provider):
             album=entry["album"],
             provider=self.name,
             stream_url="file://" + entry["id"],
+            cover_url=cover.as_uri() if cover else "",
         )
+
+    def _cover_path(self, audio_path: Path) -> Optional[Path]:
+        names = [audio_path.stem, "cover", "folder", "front"]
+        for name in names:
+            for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+                candidate = audio_path.parent / (name + suffix)
+                try:
+                    resolved = candidate.resolve()
+                    resolved.relative_to(self.root)
+                    if resolved.is_file():
+                        return resolved
+                except (OSError, ValueError):
+                    continue
+        return None
+
+    def cover_bytes(self, track: Track) -> bytes:
+        entry = self._find(track.id.split(":", 1)[1])
+        cover = self._cover_path(entry["path"])
+        if cover is None:
+            raise NotFound("no cover")
+        try:
+            with cover.open("rb") as file:
+                data = file.read(2 * 1024 * 1024 + 1)
+        except OSError as error:
+            raise NotFound("no cover") from error
+        if len(data) > 2 * 1024 * 1024:
+            raise ProviderError("cover image too large")
+        return data
 
     def search(self, query: str, limit: int) -> List[Track]:
         entries = self._entries()

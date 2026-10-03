@@ -17,6 +17,7 @@ struct MusicTrack {
     std::string album;
     uint32_t duration_ms = 0;
     std::string stream_url;
+    std::string cover_url;   // Optional album artwork; HTTP server returns <=128px JPEG
     std::string lyric_url;   // Optional plain-text LRC URL
     std::string lyric_text;  // Optional inline LRC
     std::string provider;    // Which catalog of the server it came from

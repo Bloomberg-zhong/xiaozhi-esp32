@@ -69,6 +69,8 @@ class SubsonicProvider(Provider):
             duration_ms=int(float(song.get("duration") or 0) * 1000),
             provider=self.name,
             stream_url=self._url("stream.view", params),
+            cover_url=self._url("getCoverArt.view", {"id": song["coverArt"], "size": "128"})
+            if song.get("coverArt") else "",
         )
 
     def search(self, query: str, limit: int) -> List[Track]:

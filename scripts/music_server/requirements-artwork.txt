@@ -1,0 +1,2 @@
+# Optional for direct Python deployment; audio/search do not require Pillow.
+Pillow>=10.4,<13

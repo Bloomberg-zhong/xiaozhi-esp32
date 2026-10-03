@@ -106,6 +106,10 @@ bool SubsonicSource::ParseSong(const cJSON* song, MusicTrack& track) const {
         track.duration_ms = static_cast<uint32_t>(duration->valuedouble * 1000);
     }
     track.stream_url = StreamUrl(track.id);
+    std::string cover_id = JsonString(song, "coverArt");
+    if (!cover_id.empty()) {
+        track.cover_url = ApiUrl("getCoverArt.view", {{"id", cover_id}, {"size", "128"}});
+    }
     return true;
 }
 
@@ -128,6 +132,7 @@ MusicTrack SubsonicSource::BuildTrack(const std::string& id, const std::string& 
     track.artist = artist;
     track.provider = "subsonic";
     track.stream_url = StreamUrl(id);
+    track.cover_url = ApiUrl("getCoverArt.view", {{"id", id}, {"size", "128"}});
     return track;
 }
 

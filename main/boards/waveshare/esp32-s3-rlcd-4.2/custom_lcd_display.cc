@@ -141,6 +141,14 @@ height_(height)
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
+#if CONFIG_USE_MUSIC_PLAYER
+    music_cover_lifetime_.reset();
+    music_cover_loader_.reset();
+    DisplayLockGuard lock(this);
+    if (lock && music_cover_obj_)
+        lv_image_set_src(music_cover_obj_, nullptr);
+    music_cover_image_.reset();
+#endif
 }
 
 void CustomLcdDisplay::SetPowerSaveMode(bool on) {

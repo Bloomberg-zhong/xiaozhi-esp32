@@ -5,9 +5,11 @@ import logging
 import os
 import re
 import threading
+import urllib.error
 from typing import Dict, List, Optional, Tuple
 
 from .lyrics import LyricsService
+from .artwork import normalize_cover
 from .models import NotFound, ProviderError, Track, UnknownSource, split_id
 from .netutil import Fetcher, RateLimiter, TTLCache
 from .providers import DEFAULT_ORDER, Context, Provider, provider_classes
@@ -30,7 +32,15 @@ class MusicService:
             timeout=float(config.get("upstream_timeout", 15)),
         )
         self.cache = TTLCache(int(config.get("cache_entries", 512)))
-        self.context = Context(self.fetcher, self.cache)
+        artwork_hosts = config.get("trusted_artwork_hosts", [])
+        if not isinstance(artwork_hosts, list) or any(
+            not isinstance(host, str) or not re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host
+            ) or ".." in host
+            for host in artwork_hosts
+        ):
+            raise ValueError("trusted_artwork_hosts must be a list of exact hostnames")
+        self.context = Context(self.fetcher, self.cache, [host.lower() for host in artwork_hosts])
         self.search_timeout = float(config.get("search_timeout", 8))
         self.api_keys: List[str] = [k for k in config.get("api_keys", []) if k]
         self.rate_limiter = RateLimiter(int(config.get("rate_limit_per_minute", 240)))
@@ -148,6 +158,27 @@ class MusicService:
 
     def open_stream(self, track: Track, range_header: Optional[str]):
         return self.providers[track.provider].open_stream(track, range_header)
+
+    def cover_for(self, track: Track, size: int = 128) -> bytes:
+        provider = self.providers[track.provider]
+        if not track.cover_url:
+            track = provider.resolve_cover(track)
+        if not track.cover_url:
+            raise NotFound("no cover")
+        size = max(1, min(size, 128))
+        key = ("cover", track.id, track.cover_url, size)
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            raw = provider.cover_bytes(track)
+        except ProviderError as error:
+            if isinstance(error.__cause__, urllib.error.HTTPError) and error.__cause__.code == 404:
+                raise NotFound("no cover") from error
+            raise
+        body = normalize_cover(raw, size)
+        self.cache.set(key, body, 300)
+        return body
 
     # ---- security -----------------------------------------------------
 

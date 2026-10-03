@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
+COPY requirements-artwork.txt ./
+RUN pip install --no-cache-dir -r requirements-artwork.txt
 COPY music_server.py ./
 COPY gateway_plugin.py ./
 COPY xzmusic ./xzmusic

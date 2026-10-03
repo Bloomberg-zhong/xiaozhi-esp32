@@ -12,6 +12,7 @@
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
 #if CONFIG_USE_MUSIC_PLAYER
+#include "music/local_music.h"
 #include "music/music_tools.h"
 #endif
 
@@ -96,6 +97,14 @@ void Application::Initialize() {
     display->SetupUI();
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
+
+#if CONFIG_USE_MUSIC_PLAYER
+    if (board.GetLocalMusicPath() != nullptr) {
+        // Offline card playback needs the installed fonts/models before the
+        // network-only activation task runs. Apply before audio engines start.
+        ApplyInstalledAssets();
+    }
+#endif
 
     // Setup the audio service
     auto codec = board.GetAudioCodec();
@@ -347,7 +356,21 @@ void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
 
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+#if CONFIG_USE_MUSIC_PLAYER
+    network_connected_ = true;
+    // Offline boot can reach idle/playing before the voice protocol exists.
+    // Keep both playing and paused local music intact until the user stops it.
+    if (!protocol_ && (music_player_.IsPlaying() || music_player_.IsPaused())) {
+        Board::GetInstance().GetDisplay()->UpdateStatusBar(true);
+        return;
+    }
+    const bool activate_from_local_idle = !protocol_ && state == kDeviceStateIdle;
+#else
+    const bool activate_from_local_idle = false;
+#endif
+
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring ||
+        activate_from_local_idle) {
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
@@ -371,6 +394,9 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+#if CONFIG_USE_MUSIC_PLAYER
+    network_connected_ = false;
+#endif
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
@@ -457,6 +483,7 @@ void Application::CheckAssetsVersion() {
     std::string download_url = settings.GetString("download_url");
 
     if (!download_url.empty()) {
+        assets_applied_ = false;
         settings.EraseKey("download_url");
 
         char message[256];
@@ -491,9 +518,17 @@ void Application::CheckAssetsVersion() {
     }
 
     // Apply assets
-    assets.Apply();
+    ApplyInstalledAssets();
     display->SetChatMessage("system", "");
     display->SetEmotion("robot_2");
+}
+
+void Application::ApplyInstalledAssets() {
+    // Audio engines retain model pointers. A later activation must not reload
+    // the already-applied offline models and free those live pointers.
+    if (!assets_applied_) {
+        assets_applied_ = Assets::GetInstance().Apply();
+    }
 }
 
 void Application::CheckNewVersion() {
@@ -624,8 +659,7 @@ void Application::InitializeProtocol() {
         }
     });
 
-    protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    protocol_->OnAudioChannelClosed([this]() {
         Schedule([this]() {
 #if CONFIG_USE_MUSIC_PLAYER
             // The channel may close after music has already taken over.
@@ -633,6 +667,7 @@ void Application::InitializeProtocol() {
                 return;
             }
 #endif
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -696,9 +731,12 @@ void Application::InitializeProtocol() {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
 #if CONFIG_USE_MUSIC_PLAYER
-                        if (music_player_.WantsPlayback() && music_player_.HasTrack()) {
-                            // Like a smart speaker: end the conversation after the
-                            // reply and continue with the music.
+                        if (music_handoff_pending_ && music_player_.WantsPlayback() &&
+                            music_player_.HasTrack()) {
+                            // Only an explicit play/skip request hands this reply
+                            // over to music. A wake greeting must keep listening.
+                            music_handoff_pending_ = false;
+                            esp_timer_stop(music_handoff_timer_);
                             protocol_->CloseAudioChannel();
                             SetDeviceState(kDeviceStateIdle);
                             return;
@@ -783,10 +821,9 @@ void Application::InitializeProtocol() {
             if (cJSON_IsObject(payload)) {
                 CJsonStringUniquePtr payload_json(cJSON_PrintUnformatted(payload));
                 if (payload_json) {
-                    Schedule(
-                        [this, display, payload_str = std::string(payload_json.get())]() {
-                            display->SetChatMessage("system", payload_str.c_str());
-                        });
+                    Schedule([this, display, payload_str = std::string(payload_json.get())]() {
+                        display->SetChatMessage("system", payload_str.c_str());
+                    });
                 }
             } else {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
@@ -985,6 +1022,8 @@ void Application::HandleStopListeningEvent() {
 
 void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
+        // Detection disables itself; offline music must not leave it latched off.
+        audio_service_.EnableWakeWordDetection(true);
         return;
     }
 
@@ -1280,6 +1319,16 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
 #if CONFIG_USE_MUSIC_PLAYER
 void Application::PlayMusic(bool restart) {
     Schedule([this, restart]() {
+        auto state = GetDeviceState();
+        MusicTrack track;
+        if ((state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) &&
+            activation_task_handle_ == nullptr && music_player_.GetCurrentTrack(track) &&
+            IsLocalMusicPath(track.stream_url)) {
+            // Mounted files need neither an activated voice protocol nor Wi-Fi.
+            if (!SetDeviceState(kDeviceStateIdle)) {
+                return;
+            }
+        }
         if (restart) {
             music_player_.Stop();
         }
@@ -1291,6 +1340,8 @@ void Application::PlayMusic(bool restart) {
 }
 
 void Application::ArmMusicHandoff() {
+    music_handoff_pending_ = false;
+    esp_timer_stop(music_handoff_timer_);
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting && state != kDeviceStateListening &&
         state != kDeviceStateSpeaking) {
@@ -1299,14 +1350,14 @@ void Application::ArmMusicHandoff() {
     // The normal path is the end of the spoken reply (tts stop). This is the
     // fallback when no reply comes, or the server keeps the conversation open.
     constexpr int64_t kHandoffDelayUs = 7LL * 1000 * 1000;
+    music_handoff_pending_ = true;
     music_handoff_attempts_ = 0;
-    esp_timer_stop(music_handoff_timer_);
     esp_timer_start_once(music_handoff_timer_, kHandoffDelayUs);
 }
 
 void Application::HandleMusicHandoffTimeout() {
     constexpr int kMaxSpeakingExtensions = 6;
-    if (!music_player_.WantsPlayback() || !music_player_.HasTrack()) {
+    if (!music_handoff_pending_ || !music_player_.WantsPlayback() || !music_player_.HasTrack()) {
         return;
     }
     auto state = GetDeviceState();
@@ -1321,6 +1372,7 @@ void Application::HandleMusicHandoffTimeout() {
         return;
     }
     ESP_LOGI(TAG, "Ending the conversation to start the music");
+    music_handoff_pending_ = false;
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
     }
@@ -1329,6 +1381,8 @@ void Application::HandleMusicHandoffTimeout() {
 
 void Application::PauseMusic() {
     Schedule([this]() {
+        music_handoff_pending_ = false;
+        esp_timer_stop(music_handoff_timer_);
         music_player_.SetWantsPlayback(false);
         music_player_.Pause();
         pending_music_start_ = false;
@@ -1350,6 +1404,7 @@ void Application::SkipMusic(bool forward) {
             music_failures_ = 0;
             music_player_.SetWantsPlayback(true);
             TryStartMusic();
+            ArmMusicHandoff();
         } else {
             StopMusicPlayback();
         }
@@ -1389,6 +1444,8 @@ void Application::TryStartMusic() {
 }
 
 void Application::SuspendMusicForChat() {
+    music_handoff_pending_ = false;
+    esp_timer_stop(music_handoff_timer_);
     // Keep WantsPlayback() so the music resumes after the conversation.
     music_player_.Pause();
     pending_music_start_ = false;
@@ -1396,12 +1453,19 @@ void Application::SuspendMusicForChat() {
 }
 
 void Application::StopMusicPlayback() {
+    music_handoff_pending_ = false;
+    esp_timer_stop(music_handoff_timer_);
     music_player_.SetWantsPlayback(false);
     music_player_.Stop();
     pending_music_start_ = false;
     if (GetDeviceState() == kDeviceStatePlaying) {
         Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         SetDeviceState(kDeviceStateIdle);
+    }
+    if (network_connected_ && !protocol_ && activation_task_handle_ == nullptr &&
+        GetDeviceState() == kDeviceStateIdle) {
+        // Re-run the connected handler after a deferred offline-boot activation.
+        xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
     }
 }
 
@@ -1461,7 +1525,13 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 ListeningMode Application::GetDefaultListeningMode() const {
+#if CONFIG_FORCE_AUTO_STOP_LISTENING
+    // Keep AEC available for wake-word interruption, while the existing playback
+    // drain path prevents our spoken reply from entering the next user turn.
+    return kListeningModeAutoStop;
+#else
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
+#endif
 }
 
 void Application::Reboot() {

@@ -105,6 +105,10 @@ class ArchiveProvider(Provider):
         info = meta.get("metadata") or {}
         album = _first(info.get("title")) or _first(doc.get("title")) or identifier
         creator = _first(info.get("creator")) or _first(doc.get("creator")) or ""
+        images = [f.get("name", "") for f in meta.get("files", [])
+                  if str(f.get("name", "")).lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
+        images.sort(key=lambda name: (not name.lower().rsplit("/", 1)[-1].startswith(("cover", "front")), name))
+        cover = self._download_url(identifier, images[0]) if images else ""
 
         files = [f for f in meta.get("files", []) if f.get("format") in MP3_FORMATS]
         # Prefer one format per song: keep the best-ranked format of each base name.
@@ -128,6 +132,7 @@ class ArchiveProvider(Provider):
                     duration_ms=parse_length(f.get("length")),
                     provider=self.name,
                     stream_url=self._download_url(identifier, f["name"]),
+                    cover_url=cover,
                 )
             )
         return tracks
@@ -144,6 +149,13 @@ class ArchiveProvider(Provider):
         if not sep or not identifier or not filename:
             raise NotFound(local_id)
         title = filename.rsplit(".", 1)[0].replace("_", " ")
+        try:
+            for track in self._expand({"identifier": identifier}):
+                if track.id == "archive:" + local_id:
+                    return track
+        except ProviderError:
+            # Metadata failure should not prevent playback of a saved audio URL.
+            pass
         return Track(
             id="archive:" + local_id,
             title=title,

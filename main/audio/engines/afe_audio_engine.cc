@@ -148,8 +148,15 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     }
 
     afe_config->aec_init = codec_->input_reference();
+#if CONFIG_FORCE_AUTO_STOP_LISTENING
+    // Replies are isolated from voice uplink. SR AEC keeps linear echo filtering
+    // without FD nonlinear suppression that can erase near-end wake phrases.
+    afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
+    afe_config->aec_nlp_level = AEC_NLP_LEVEL_NORMAL;
+#else
     afe_config->aec_mode = AEC_MODE_FD_LOW_COST;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
+#endif
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
     afe_config->vad_mode = VAD_MODE_0;

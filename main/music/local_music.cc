@@ -1,4 +1,5 @@
 #include "local_music.h"
+#include "music_cache.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -103,7 +104,12 @@ void Scan(const std::string& folder, int depth, const LocalMusicScanOptions& opt
         if (tracks.size() >= options.max_tracks) {
             return;
         }
-        tracks.push_back(MakeTrack(folder, name));
+        MusicTrack track = MakeTrack(folder, name);
+        if (MusicCache::IsManagedPath(track.stream_url) &&
+            !MusicCache::ReadTrack(track.stream_url, track)) {
+            continue;
+        }
+        tracks.push_back(std::move(track));
     }
     for (const auto& name : folders) {
         if (tracks.size() >= options.max_tracks) {

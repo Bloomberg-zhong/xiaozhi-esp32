@@ -6,6 +6,7 @@
   /track?id=               {"track": {...}}
   /stream/<id>             audio (Range supported); <id> is percent-encoded
   /lyrics/<id>             synchronized lyrics as LRC text, 404 if none
+  /cover/<id>?size=128     baseline JPEG <=128x128, 404 if none
 """
 
 import json
@@ -15,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__
-from .models import NotFound, ProviderError, UnknownSource
+from .models import ArtworkUnavailable, NotFound, ProviderError, UnknownSource
 from .service import MusicService
 
 log = logging.getLogger("xzmusic")
@@ -77,6 +78,8 @@ def make_handler(service: MusicService, trust_proxy: bool = False):
                     self._stream(unquote(path[len("/stream/") :]))
                 elif path.startswith("/lyrics/"):
                     self._lyrics(unquote(path[len("/lyrics/") :]))
+                elif path.startswith("/cover/"):
+                    self._cover(unquote(path[len("/cover/") :]), parse_qs(url.query))
                 else:
                     self._error(404, "not found")
             except UnknownSource as error:
@@ -85,6 +88,8 @@ def make_handler(service: MusicService, trust_proxy: bool = False):
                 self._error(404, "not found")
             except ProviderError as error:
                 self._error(502, str(error))
+            except ArtworkUnavailable as error:
+                self._error(503, str(error))
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception:
@@ -144,6 +149,21 @@ def make_handler(service: MusicService, trust_proxy: bool = False):
                     response.close()
             finally:
                 service.stream_slots.release()
+
+        def _cover(self, track_id: str, params):
+            try:
+                size = max(1, min(int(params.get("size", ["128"])[0]), 128))
+            except ValueError:
+                self._error(400, "invalid cover size")
+                return
+            track = service.get(track_id)
+            body = service.cover_for(track, size)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=300")
+            self.end_headers()
+            self.wfile.write(body)
 
     return Handler
 

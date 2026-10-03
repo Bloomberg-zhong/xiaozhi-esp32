@@ -240,7 +240,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     bool charging, discharging;
     const char* icon = nullptr;
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
-        if (charging) {
+        if (charging || ShouldShowUsbPowerIcon()) {
             icon = MATERIAL_SYMBOLS_BATTERY_ANDROID_FRAME_BOLT;
         } else {
             const char* levels[] = {

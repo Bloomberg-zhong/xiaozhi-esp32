@@ -46,13 +46,19 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
             return to == kDeviceStateStarting;
 
         case kDeviceStateStarting:
-            // Can go to wifi configuring or activating
+            // Local music can become ready without network activation.
             return to == kDeviceStateWifiConfiguring ||
+#if CONFIG_USE_MUSIC_PLAYER
+                   to == kDeviceStateIdle ||
+#endif
                    to == kDeviceStateActivating;
 
         case kDeviceStateWifiConfiguring:
             // Can go to activating (after wifi connected) or audio testing
             return to == kDeviceStateActivating ||
+#if CONFIG_USE_MUSIC_PLAYER
+                   to == kDeviceStateIdle ||
+#endif
                    to == kDeviceStateAudioTesting;
 
         case kDeviceStateAudioTesting:

@@ -26,17 +26,6 @@ void StyleMusicCard(lv_obj_t* card) {
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 }
 
-void StyleCircle(lv_obj_t* circle, int size, lv_color_t color) {
-    lv_obj_set_size(circle, size, size);
-    lv_obj_center(circle);
-    lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(circle, color, 0);
-    lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(circle, 0, 0);
-    lv_obj_set_style_pad_all(circle, 0, 0);
-    lv_obj_remove_flag(circle, LV_OBJ_FLAG_SCROLLABLE);
-}
-
 const char* JsonString(const cJSON* object, const char* name, const char* fallback = "") {
     auto* value = cJSON_GetObjectItemCaseSensitive(object, name);
     return cJSON_IsString(value) ? value->valuestring : fallback;
@@ -78,22 +67,32 @@ void CustomLcdDisplay::SetupMusicUI() {
     lv_obj_set_style_pad_all(music_page_, 0, 0);
     lv_obj_remove_flag(music_page_, LV_OBJ_FLAG_SCROLLABLE);
 
-    auto* vinyl_card = lv_obj_create(music_page_);
-    lv_obj_set_pos(vinyl_card, 12, 8);
-    lv_obj_set_size(vinyl_card, 140, 144);
-    StyleMusicCard(vinyl_card);
-    auto* disc = lv_obj_create(vinyl_card);
-    StyleCircle(disc, 114, lv_color_black());
-    for (int diameter : {88, 66, 44}) {
-        auto* ring = lv_obj_create(disc);
-        StyleCircle(ring, diameter, lv_color_black());
-        lv_obj_set_style_border_color(ring, lv_color_white(), 0);
-        lv_obj_set_style_border_width(ring, 1, 0);
-    }
-    auto* center = lv_obj_create(disc);
-    StyleCircle(center, 26, lv_color_white());
-    auto* hole = lv_obj_create(center);
-    StyleCircle(hole, 8, lv_color_black());
+    auto* cover_card = lv_obj_create(music_page_);
+    lv_obj_set_pos(cover_card, 12, 8);
+    lv_obj_set_size(cover_card, 140, 144);
+    StyleMusicCard(cover_card);
+    lv_obj_set_style_pad_all(cover_card, 0, 0);
+    music_cover_obj_ = lv_image_create(cover_card);
+    lv_obj_center(music_cover_obj_);
+    lv_obj_add_flag(music_cover_obj_, LV_OBJ_FLAG_HIDDEN);
+    music_cover_placeholder_ = lv_label_create(cover_card);
+    lv_label_set_text(music_cover_placeholder_, "暂无封面");
+    lv_obj_center(music_cover_placeholder_);
+    std::weak_ptr<int> lifetime = music_cover_lifetime_;
+    music_cover_loader_ = std::make_unique<MusicCoverLoader>(
+        [this, lifetime](uint32_t session, std::shared_ptr<LvglAllocatedImage> image) {
+            if (lifetime.expired() ||
+                Application::GetInstance().GetMusicPlayer().session_id() != session)
+                return;
+            DisplayLockGuard lock(this);
+            if (!lock || session != music_ui_session_id_)
+                return;
+            lv_image_set_src(music_cover_obj_, image->image_dsc());
+            lv_obj_center(music_cover_obj_);
+            music_cover_image_ = std::move(image);
+            lv_obj_remove_flag(music_cover_obj_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(music_cover_placeholder_, LV_OBJ_FLAG_HIDDEN);
+        });
 
     auto* info_card = lv_obj_create(music_page_);
     lv_obj_set_pos(info_card, 164, 8);
@@ -145,7 +144,7 @@ void CustomLcdDisplay::SetupMusicUI() {
     auto* controls = lv_label_create(music_page_);
     lv_obj_set_pos(controls, 12, 218);
     lv_obj_set_width(controls, width_ - 24);
-    lv_label_set_text(controls, "KEY：单击暂停/继续 · 双击下一首\n三击切换模式 · 长按停止");
+    lv_label_set_text(controls, "KEY：单击暂停回首页 · 双击下一首\n三击切换模式 · 长按停止回首页");
     lv_obj_add_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -163,40 +162,27 @@ void CustomLcdDisplay::RefreshMusicUI() {
     }
     const char* state = JsonString(status.get(), "state");
     const bool paused = std::strcmp(state, "paused") == 0;
-    const bool has_session = paused || std::strcmp(state, "playing") == 0;
-    const bool visible =
-        rlcd_music_ui::ShouldShowMusicPage(app.GetDeviceState(), has_session, paused);
     const uint32_t session_id = player.session_id();
+    // Copy the source/track before entering LVGL. Request queues only one job;
+    // network, cache checks and JPEG decoding happen in its background task.
+    MusicTrack artwork_track;
+    auto source = player.GetSource();
+    const std::string root = player.GetLocalRoot();
+    const bool have_track = player.GetCurrentTrack(artwork_track);
     DisplayLockGuard lock(this);
-    if (!lock) {
+    if (!lock || !music_page_visible_)
         return;
-    }
-    if (visible != music_page_visible_) {
-        music_page_visible_ = visible;
-        if (visible) {
-            lv_obj_remove_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(music_page_);
-            lv_obj_move_foreground(top_bar_);
-            lv_obj_move_foreground(status_bar_);
-            lv_obj_move_foreground(low_battery_popup_);
-            if (gif_controller_) {
-                gif_controller_->Stop();
-            }
-        } else {
-            lv_obj_add_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
-            if (gif_controller_) {
-                gif_controller_->Start();
-            }
-        }
-        ESP_LOGI("MusicUI", "Page: %s", visible ? "music" : "assistant");
-    }
-    if (!visible) {
-        return;
-    }
     auto* track = cJSON_GetObjectItemCaseSensitive(status.get(), "track");
     if (session_id != music_ui_session_id_) {
         music_ui_session_id_ = session_id;
         SetLabelText(music_lyric_label_, "暂无歌词");
+        lv_obj_add_flag(music_cover_obj_, LV_OBJ_FLAG_HIDDEN);
+        lv_image_set_src(music_cover_obj_, nullptr);
+        music_cover_image_.reset();
+        lv_obj_remove_flag(music_cover_placeholder_, LV_OBJ_FLAG_HIDDEN);
+        if (have_track && music_cover_loader_)
+            music_cover_loader_->Request(session_id, std::move(artwork_track), std::move(source),
+                                         root);
     }
     SetLabelText(music_title_label_, JsonString(track, "title", "未知歌曲"));
     const char* artist = JsonString(track, "artist");
@@ -216,20 +202,12 @@ void CustomLcdDisplay::RefreshMusicUI() {
 }
 #endif  // CONFIG_USE_MUSIC_PLAYER
 
-void CustomLcdDisplay::SetupUI() {
-    if (IsSetupUICalled()) {
-        return;
-    }
-    LcdDisplay::SetupUI();
-#if CONFIG_USE_MUSIC_PLAYER
-    DisplayLockGuard lock(this);
-    if (lock) {
-        SetupMusicUI();
-    }
-#endif
-}
-
 void CustomLcdDisplay::SetStatus(const char* status) {
+    RefreshDashboard();
+    if (active_page_ == rlcd_dashboard::DashboardPage::kHome)
+        status = "桌面助手";
+    else if (active_page_ == rlcd_dashboard::DashboardPage::kCalendar)
+        status = "日历";
 #if CONFIG_USE_MUSIC_PLAYER
     RefreshMusicUI();
     if (music_page_visible_) {
@@ -265,6 +243,9 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
 }
 
 void CustomLcdDisplay::SetEmotion(const char* emotion) {
+    RefreshDashboard();
+    if (active_page_ != rlcd_dashboard::DashboardPage::kAssistant)
+        return;
 #if CONFIG_USE_MUSIC_PLAYER
     RefreshMusicUI();
     if (music_page_visible_) {
@@ -275,6 +256,7 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
 }
 
 void CustomLcdDisplay::UpdateStatusBar(bool update_all) {
+    RefreshDashboard();
 #if CONFIG_USE_MUSIC_PLAYER
     // The application's existing one-second tick updates progress without an
     // extra polling task or timer. Only changed labels invalidate the panel.

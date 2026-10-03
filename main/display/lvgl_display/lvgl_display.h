@@ -34,6 +34,9 @@ public:
     virtual bool SupportsGuiOperations() const override { return true; }
 
 protected:
+    // A confirmed USB host link can use the external-power bolt without
+    // reporting unmeasured battery charge current through Board::GetBatteryLevel.
+    virtual bool ShouldShowUsbPowerIcon() const { return false; }
     esp_pm_lock_handle_t pm_lock_ = nullptr;
     lv_display_t* display_ = nullptr;
 
