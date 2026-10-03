@@ -12,6 +12,7 @@
 enum class PowerSaveLevel { LOW_POWER, PERFORMANCE };
 struct Display {
     void UpdateStatusBar(bool) {}
+    void ShowNotification(const char*, int) {}
 };
 struct Board {
     Display display;

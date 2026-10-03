@@ -17,6 +17,7 @@
 #endif
 
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
@@ -1427,8 +1428,12 @@ void Application::TryStartMusic() {
     }
     // During a conversation the music waits; it starts once the device is idle
     // again and the channel is closed.
-    if (state != kDeviceStateIdle || (protocol_ && protocol_->IsAudioChannelOpened())) {
+    if (state != kDeviceStateIdle) {
         return;
+    }
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        // An idle device with a lingering channel must not swallow the request.
+        protocol_->CloseAudioChannel();
     }
     if (!audio_service_.IsPlaybackIdle()) {
         // Let the spoken reply finish first (MAIN_EVENT_PLAYBACK_DRAINED).
@@ -1437,6 +1442,12 @@ void Application::TryStartMusic() {
     }
     if (music_player_.Play() == 0) {
         music_player_.SetWantsPlayback(false);
+        ESP_LOGE(TAG, "Music start failed, internal heap free=%u largest=%u",
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+        if (auto display = Board::GetInstance().GetDisplay()) {
+            display->ShowNotification("音乐启动失败", 3000);
+        }
         return;
     }
     Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
@@ -1489,7 +1500,11 @@ void Application::HandleMusicFinished(uint32_t session_id, bool success, const s
     music_player_.Stop();
     if (success) {
         music_failures_ = 0;
-    } else if (++music_failures_ >= kMaxConsecutiveFailures) {
+    } else if (++music_failures_ < kMaxConsecutiveFailures) {
+        if (auto display = Board::GetInstance().GetDisplay()) {
+            display->ShowNotification(error.c_str(), 3000);
+        }
+    } else {
         StopMusicPlayback();
         Alert(Lang::Strings::ERROR, error.c_str(), "sad", Lang::Sounds::OGG_EXCLAMATION);
         return;

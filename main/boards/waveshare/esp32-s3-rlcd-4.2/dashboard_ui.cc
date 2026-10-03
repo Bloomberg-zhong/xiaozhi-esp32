@@ -13,8 +13,6 @@
 #include "dashboard_weather.h"
 #include "lvgl_theme.h"
 
-LV_FONT_DECLARE(font_rlcd_calendar_14);
-
 namespace {
 using rlcd_dashboard::DashboardPage;
 
@@ -84,8 +82,6 @@ const char* PageName(DashboardPage page) {
     switch (page) {
         case DashboardPage::kHome:
             return "home";
-        case DashboardPage::kCalendar:
-            return "calendar";
         case DashboardPage::kAssistant:
             return "assistant";
         case DashboardPage::kMusic:
@@ -128,7 +124,6 @@ void CustomLcdDisplay::SetupUI() {
     WrapAssistantUI();
     SetupBatteryPercentageUI();
     SetupDashboardUI();
-    SetupCalendarUI();
 #if CONFIG_USE_MUSIC_PLAYER
     SetupMusicUI();
 #endif
@@ -195,43 +190,12 @@ void CustomLcdDisplay::SetupDashboardUI() {
     dashboard_controls_label_ =
         Label(dashboard_page_, 12, 244, width_ - 24, "长按KEY播放内存卡音乐");
 #else
-    Label(dashboard_page_, 12, 244, width_ - 24, "语音切换日历 · 添加备忘");
+    Label(dashboard_page_, 12, 244, width_ - 24, "告诉小智：添加备忘");
 #endif
 }
 
-void CustomLcdDisplay::SetupCalendarUI() {
-    calendar_page_ = lv_obj_create(lv_display_get_screen_active(display_));
-    StylePage(calendar_page_, width_, height_);
-    // Own compact CJK subset: dates remain readable without server-pushed glyphs.
-    lv_obj_set_style_text_font(calendar_page_, &font_rlcd_calendar_14, 0);
-    calendar_title_label_ = Label(calendar_page_, 12, 4, 130, "等待校时");
-    lv_obj_set_style_text_align(calendar_title_label_, LV_TEXT_ALIGN_CENTER, 0);
-    calendar_lunar_label_ = Label(calendar_page_, 148, 4, width_ - 160, "今日农历：等待校时");
-    lv_obj_set_style_text_align(calendar_lunar_label_, LV_TEXT_ALIGN_RIGHT, 0);
-    constexpr const char* weekdays[] = {"一", "二", "三", "四", "五", "六", "日"};
-    const int cell_width = (width_ - 24) / 7;
-    for (int column = 0; column < 7; ++column) {
-        auto* day =
-            Label(calendar_page_, 12 + column * cell_width, 25, cell_width, weekdays[column]);
-        lv_obj_set_style_text_align(day, LV_TEXT_ALIGN_CENTER, 0);
-    }
-    Divider(calendar_page_, 46, width_);
-    for (int i = 0; i < 42; ++i) {
-        auto* day =
-            Label(calendar_page_, 14 + (i % 7) * cell_width, 49 + (i / 7) * 32, cell_width - 4, "");
-        lv_obj_set_height(day, 31);
-        lv_obj_set_style_text_line_space(day, -3, 0);
-        lv_obj_set_style_text_align(day, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_radius(day, 6, 0);
-        calendar_day_labels_[i] = day;
-    }
-    Divider(calendar_page_, 241, width_);
-    calendar_ai_label_ = Label(calendar_page_, 12, 246, 110, "小智 待命");
-    Label(calendar_page_, 124, 246, width_ - 136, "语音：上月 · 下月 · 回首页");
-}
-
 void CustomLcdDisplay::ShowPageLocked(DashboardPage page) {
-    if (!assistant_page_ || !dashboard_page_ || !calendar_page_)
+    if (!assistant_page_ || !dashboard_page_)
         return;
 #if CONFIG_USE_MUSIC_PLAYER
     if (page == DashboardPage::kMusic && music_page_ == nullptr)
@@ -244,16 +208,13 @@ void CustomLcdDisplay::ShowPageLocked(DashboardPage page) {
         return;
     lv_obj_add_flag(assistant_page_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(dashboard_page_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(calendar_page_, LV_OBJ_FLAG_HIDDEN);
 #if CONFIG_USE_MUSIC_PLAYER
     lv_obj_add_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
     music_page_visible_ = page == DashboardPage::kMusic;
     if (page == DashboardPage::kMusic)
         lv_obj_remove_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
 #endif
-    lv_obj_t* visible = page == DashboardPage::kAssistant  ? assistant_page_
-                        : page == DashboardPage::kCalendar ? calendar_page_
-                                                           : dashboard_page_;
+    lv_obj_t* visible = page == DashboardPage::kAssistant ? assistant_page_ : dashboard_page_;
     if (page != DashboardPage::kMusic)
         lv_obj_remove_flag(visible, LV_OBJ_FLAG_HIDDEN);
     // Shared native network/battery/notification widgets stay above every page.
@@ -319,7 +280,6 @@ void CustomLcdDisplay::RefreshDashboard() {
             paused ? "KEY播放音乐 · 长按停止回首页" : "长按KEY播放内存卡音乐");
 #endif
     SetText(dashboard_ai_label_, StateText(app.GetDeviceState()));
-    SetText(calendar_ai_label_, StateText(app.GetDeviceState()));
     char text[96];
     if (time_valid) {
         std::strftime(text, sizeof(text), "%H:%M", &local);
@@ -328,44 +288,9 @@ void CustomLcdDisplay::RefreshDashboard() {
         std::snprintf(text, sizeof(text), "%04d-%02d-%02d %s", local.tm_year + 1900,
                       local.tm_mon + 1, local.tm_mday, weekdays[local.tm_wday]);
         SetText(dashboard_date_label_, text);
-        auto month = rlcd_dashboard::ShiftCalendarMonth(local.tm_year + 1900, local.tm_mon + 1,
-                                                        calendar_month_offset_);
-        const int stamp = (month.year * 12 + month.month) * 32 + local.tm_mday;
-        if (stamp != calendar_stamp_) {
-            calendar_stamp_ = stamp;
-            std::snprintf(text, sizeof(text), "%d年%d月", month.year, month.month);
-            SetText(calendar_title_label_, text);
-            auto lunar_today = rlcd_dashboard::GregorianToLunar(local.tm_year + 1900,
-                                                                local.tm_mon + 1, local.tm_mday);
-            const std::string lunar_text =
-                lunar_today ? rlcd_dashboard::FormatLunarDate(*lunar_today) : "超出换算范围";
-            SetText(calendar_lunar_label_, "今日农历 " + lunar_text);
-            ESP_LOGI("DesktopUI", "Calendar %04d-%02d, today %s", month.year, month.month,
-                     lunar_text.c_str());
-            for (size_t i = 0; i < month.days.size(); ++i) {
-                int day = month.days[i];
-                std::snprintf(text, sizeof(text), "%d", day);
-                std::string cell = day ? text : "";
-                if (day) {
-                    auto lunar = rlcd_dashboard::LunarCellText(month.year, month.month, day);
-                    if (!lunar.empty())
-                        cell += "\n" + lunar;
-                }
-                SetText(calendar_day_labels_[i], cell);
-                bool today = month.year == local.tm_year + 1900 &&
-                             month.month == local.tm_mon + 1 && day == local.tm_mday;
-                lv_obj_set_style_bg_color(calendar_day_labels_[i], lv_color_black(), 0);
-                lv_obj_set_style_bg_opa(calendar_day_labels_[i],
-                                        today ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-                lv_obj_set_style_text_color(calendar_day_labels_[i],
-                                            today ? lv_color_white() : lv_color_black(), 0);
-            }
-        }
     } else {
         SetText(dashboard_time_label_, "--:--");
         SetText(dashboard_date_label_, "等待网络校时");
-        SetText(calendar_title_label_, "等待网络校时");
-        SetText(calendar_lunar_label_, "今日农历：等待校时");
     }
     if (weather.IsValid()) {
         SetText(dashboard_city_label_, weather.city + "天气");
@@ -415,23 +340,6 @@ void CustomLcdDisplay::RequestPage(DashboardPage page) {
             return;
         page_router_.Request(page);
         ShowPageLocked(page);
-    }
-    RefreshDashboard();
-}
-
-void CustomLcdDisplay::ToggleHomeCalendarPage() {
-    RequestPage(active_page_ == DashboardPage::kCalendar ? DashboardPage::kHome
-                                                         : DashboardPage::kCalendar);
-}
-
-void CustomLcdDisplay::BrowseCalendarMonth(int direction) {
-    {
-        DisplayLockGuard lock(this);
-        if (!lock)
-            return;
-        calendar_month_offset_ = std::clamp(calendar_month_offset_ + direction, -120, 120);
-        page_router_.Request(DashboardPage::kCalendar);
-        calendar_stamp_ = -1;
     }
     RefreshDashboard();
 }

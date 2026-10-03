@@ -542,7 +542,9 @@ bool MusicPlayer::StartTasks(const std::shared_ptr<Session>& session) {
     if (xTaskCreate(TaskEntry, "music_net", kNetTaskStackSize, net_context, kNetTaskPriority,
                     nullptr) != pdPASS) {
         delete net_context;
-        ESP_LOGE(TAG, "Failed to create the music network task");
+        ESP_LOGE(TAG, "Failed to create the music network task (internal free=%u largest=%u)",
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         return false;
     }
     auto* decode_context = new TaskContext{this, session, true};
@@ -550,7 +552,9 @@ bool MusicPlayer::StartTasks(const std::shared_ptr<Session>& session) {
                     kDecodeTaskPriority, nullptr) != pdPASS) {
         delete decode_context;
         session->cancelled = true;  // Stops the network task
-        ESP_LOGE(TAG, "Failed to create the music decoder task");
+        ESP_LOGE(TAG, "Failed to create the music decoder task (internal free=%u largest=%u)",
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         return false;
     }
     return true;

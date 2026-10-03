@@ -122,7 +122,7 @@ void AddDashboardTools(CustomLcdDisplay* display) {
 
     mcp_server.AddTool(
         "self.disp.switch",
-        "切换桌面页面。page 为 home/weather（桌面首页）、calendar（日历）或 music（播放器）。",
+        "切换桌面页面。page 为 home/weather（桌面首页）或 music（播放器）。",
         PropertyList({Property("page", kPropertyTypeString)}),
         [display](const PropertyList& properties) -> ReturnValue {
             std::string page = properties["page"].value<std::string>();
@@ -130,25 +130,14 @@ void AddDashboardTools(CustomLcdDisplay* display) {
             DashboardPage target;
             if (page == "home" || page == "weather")
                 target = DashboardPage::kHome;
-            else if (page == "calendar")
-                target = DashboardPage::kCalendar;
 #if CONFIG_USE_MUSIC_PLAYER
             else if (page == "music")
                 target = DashboardPage::kMusic;
 #endif
             else
-                return std::string("页面无效，请使用 home、calendar 或 music");
+                return std::string("页面无效，请使用 home 或 music");
             Application::GetInstance().Schedule(
                 [display, target]() { display->RequestPage(target); });
             return std::string("已切换页面：") + page;
         });
-    mcp_server.AddTool("self.calendar.browse",
-                       "日历翻月，offset 为相对当前显示月份的偏移：-1 上月，1 下月。",
-                       PropertyList({Property("offset", kPropertyTypeInteger, -12, 12)}),
-                       [display](const PropertyList& properties) -> ReturnValue {
-                           int offset = properties["offset"].value<int>();
-                           Application::GetInstance().Schedule(
-                               [display, offset]() { display->BrowseCalendarMonth(offset); });
-                           return std::string("已翻到指定月份");
-                       });
 }

@@ -206,8 +206,6 @@ void CustomLcdDisplay::SetStatus(const char* status) {
     RefreshDashboard();
     if (active_page_ == rlcd_dashboard::DashboardPage::kHome)
         status = "桌面助手";
-    else if (active_page_ == rlcd_dashboard::DashboardPage::kCalendar)
-        status = "日历";
 #if CONFIG_USE_MUSIC_PLAYER
     RefreshMusicUI();
     if (music_page_visible_) {

@@ -209,9 +209,15 @@ private:
                         board->local_music_scan_pending_ = false;
                         auto& app = Application::GetInstance();
                         const auto state = app.GetDeviceState();
-                        if (state != kDeviceStateIdle && state != kDeviceStateStarting &&
-                            state != kDeviceStateWifiConfiguring)
-                            return;  // A conversation/activation now owns the device
+                        const bool can_start =
+                            state == kDeviceStateIdle || state == kDeviceStateStarting ||
+                            state == kDeviceStateWifiConfiguring || state == kDeviceStateActivating;
+                        if (!can_start) {
+                            // A conversation now owns the device; tell the user instead of
+                            // silently dropping the request.
+                            board->display_->ShowNotification("对话中，请结束后再长按播放", 3000);
+                            return;
+                        }
                         if (tracks.empty()) {
                             board->display_->ShowNotification("内存卡里没有音乐", 3000);
                             return;
@@ -225,7 +231,7 @@ private:
                 request.reset();
                 vTaskDelete(nullptr);
             },
-            "sd_music_scan", 4096, request.get(), 2, nullptr);
+            "sd_music_scan", 8192, request.get(), 2, nullptr);
         if (result != pdPASS) {
             local_music_scan_pending_ = false;
             local_music_scan_running_ = false;

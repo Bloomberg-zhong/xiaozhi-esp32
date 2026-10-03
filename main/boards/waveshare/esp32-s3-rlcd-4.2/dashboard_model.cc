@@ -5,20 +5,6 @@
 
 namespace rlcd_dashboard {
 namespace {
-struct LunarYearEncoding {
-    uint16_t january1;
-    uint16_t month_lengths;
-};
-constexpr LunarYearEncoding kLunarYears[] = {
-#include "dashboard_lunar_data.inc"
-};
-constexpr const char* kLunarMonths[] = {"正月", "二月", "三月", "四月", "五月", "六月",
-                                        "七月", "八月", "九月", "十月", "冬月", "腊月"};
-constexpr const char* kLunarDays[] = {
-    "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
-    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-    "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"};
-
 bool ParseTwoDigits(const std::string& value, size_t offset, int& output) {
     if (offset + 2 > value.size() || value[offset] < '0' || value[offset] > '9' ||
         value[offset + 1] < '0' || value[offset + 1] > '9') {
@@ -130,7 +116,7 @@ std::optional<ReminderItem> ReminderBook::PopDue(const std::tm& local_time) {
 }
 
 void PageRouter::Request(DashboardPage page) {
-    if (page == DashboardPage::kHome || page == DashboardPage::kCalendar)
+    if (page == DashboardPage::kHome)
         idle_page_ = page;
     requested_page_ = page;
 }
@@ -173,75 +159,6 @@ int DaysInMonth(int year, int month) {
         return 0;
     bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     return month == 2 && leap ? 29 : days[month - 1];
-}
-
-CalendarMonth BuildCalendarMonth(int year, int month) {
-    CalendarMonth result;
-    if (year < 1900 || year > 2199 || month < 1 || month > 12)
-        return result;
-    result.year = year;
-    result.month = month;
-    // Gregorian weekday calculation; independent of process timezone/DST.
-    constexpr int offsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-    int y = year - (month < 3 ? 1 : 0);
-    int sunday_first = (y + y / 4 - y / 100 + y / 400 + offsets[month - 1] + 1) % 7;
-    int first = (sunday_first + 6) % 7;
-    for (int day = 1; day <= DaysInMonth(year, month); ++day)
-        result.days[first + day - 1] = day;
-    return result;
-}
-
-CalendarMonth ShiftCalendarMonth(int year, int month, int offset) {
-    if (month < 1 || month > 12 || offset < -120 || offset > 120)
-        return {};
-    int absolute = year * 12 + month - 1 + offset;
-    if (absolute < 1900 * 12 || absolute >= 2200 * 12)
-        return {};
-    return BuildCalendarMonth(absolute / 12, absolute % 12 + 1);
-}
-
-std::optional<LunarDate> GregorianToLunar(int year, int month, int day) {
-    if (year < 1901 || year > 2100 || month < 1 || month > 12 || day < 1 ||
-        day > DaysInMonth(year, month))
-        return std::nullopt;
-    const auto& encoded = kLunarYears[year - 1901];
-    int lunar_month = encoded.january1 & 15;
-    int remaining = ((encoded.january1 >> 4) & 31) - 1 + day - 1;
-    int leap_index = (encoded.january1 >> 9) & 15;
-    int lunar_year = year - 1;
-    for (int m = 1; m < month; ++m)
-        remaining += DaysInMonth(year, m);
-    for (int index = 0; index < 14; ++index) {
-        const int length = 29 + ((encoded.month_lengths >> index) & 1);
-        if (remaining < length)
-            return LunarDate{lunar_year, lunar_month, remaining + 1, index == leap_index};
-        remaining -= length;
-        if (index + 1 != leap_index) {
-            lunar_month = lunar_month % 12 + 1;
-            if (lunar_month == 1)
-                ++lunar_year;
-        }
-    }
-    return std::nullopt;
-}
-
-std::string FormatLunarDate(const LunarDate& date) {
-    if (date.year < 1900 || date.year > 2100 || date.month < 1 || date.month > 12 || date.day < 1 ||
-        date.day > 30)
-        return "";
-    constexpr const char* stems[] = {"甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"};
-    constexpr const char* branches[] = {"子", "丑", "寅", "卯", "辰", "巳",
-                                        "午", "未", "申", "酉", "戌", "亥"};
-    return std::string(stems[(date.year - 4) % 10]) + branches[(date.year - 4) % 12] + "年 " +
-           (date.leap ? "闰" : "") + kLunarMonths[date.month - 1] + kLunarDays[date.day - 1];
-}
-
-std::string LunarCellText(int year, int month, int day) {
-    auto lunar = GregorianToLunar(year, month, day);
-    if (!lunar)
-        return "";
-    return lunar->day == 1 ? std::string(lunar->leap ? "闰" : "") + kLunarMonths[lunar->month - 1]
-                           : kLunarDays[lunar->day - 1];
 }
 
 std::optional<RoomEnvironment> DecodeShtc3Sample(const uint8_t* data, size_t size) {

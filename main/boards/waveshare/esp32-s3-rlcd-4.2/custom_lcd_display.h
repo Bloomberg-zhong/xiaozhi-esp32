@@ -52,7 +52,6 @@ private:
 
     lv_obj_t* assistant_page_ = nullptr;
     lv_obj_t* dashboard_page_ = nullptr;
-    lv_obj_t* calendar_page_ = nullptr;
     lv_obj_t* dashboard_time_label_ = nullptr;
     lv_obj_t* dashboard_date_label_ = nullptr;
     lv_obj_t* dashboard_city_label_ = nullptr;
@@ -65,22 +64,15 @@ private:
     lv_obj_t* dashboard_ai_label_ = nullptr;
     lv_obj_t* dashboard_controls_label_ = nullptr;
     lv_obj_t* battery_percentage_label_ = nullptr;
-    lv_obj_t* calendar_title_label_ = nullptr;
-    lv_obj_t* calendar_lunar_label_ = nullptr;
-    lv_obj_t* calendar_ai_label_ = nullptr;
-    std::array<lv_obj_t*, 42> calendar_day_labels_{};
     rlcd_dashboard::PageRouter page_router_;
     std::atomic<rlcd_dashboard::DashboardPage> active_page_{rlcd_dashboard::DashboardPage::kHome};
     bool active_page_initialized_ = false;
-    int calendar_month_offset_ = 0;
-    int calendar_stamp_ = -1;
     std::string active_reminder_text_;
     time_t active_reminder_until_ = 0;
     void WrapAssistantUI();
     void SetupBatteryPercentageUI();
     void RefreshBatteryPercentage(bool available, int level);
     void SetupDashboardUI();
-    void SetupCalendarUI();
     void ShowPageLocked(rlcd_dashboard::DashboardPage page);
     void RefreshDashboard();
 
@@ -115,8 +107,6 @@ public:
     void SetEmotion(const char* emotion) override;
     void UpdateStatusBar(bool update_all = false) override;
     void RequestPage(rlcd_dashboard::DashboardPage page);
-    void ToggleHomeCalendarPage();
-    void BrowseCalendarMonth(int direction);
     // Switches the ST7305 controller between high power mode (fast refresh)
     // and low power mode (slow refresh, a fraction of the panel current).
     virtual void SetPowerSaveMode(bool on) override;

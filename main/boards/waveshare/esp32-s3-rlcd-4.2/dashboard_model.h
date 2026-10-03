@@ -17,10 +17,10 @@ inline constexpr size_t kMaxWeatherConditionBytes = 48;
 inline constexpr size_t kMaxWeatherTimestampBytes = 64;
 inline constexpr size_t kMaxReminderContentBytes = 192;
 
-enum class DashboardPage { kHome, kCalendar, kAssistant, kMusic };
+enum class DashboardPage { kHome, kAssistant, kMusic };
 
 // Explicit page requests remain visible through the current reply, but a new
-// wake or song takes over. The idle preference is home/calendar only.
+// wake or song takes over.
 class PageRouter {
 public:
     void Request(DashboardPage page);
@@ -63,22 +63,7 @@ private:
 bool IsValidReminderTime(const std::string& value);
 bool IsReminderDue(const std::string& value, const std::tm& local_time);
 
-struct CalendarMonth {
-    int year = 0, month = 0;
-    std::array<int, 42> days{};  // Monday first; zero is an empty cell.
-};
 int DaysInMonth(int year, int month);
-CalendarMonth BuildCalendarMonth(int year, int month);
-CalendarMonth ShiftCalendarMonth(int year, int month, int offset);
-
-struct LunarDate {
-    int year = 0, month = 0, day = 0;
-    bool leap = false;
-};
-// Offline HKO conversion data covers Gregorian 1901-01-01 through 2100-12-31.
-std::optional<LunarDate> GregorianToLunar(int year, int month, int day);
-std::string FormatLunarDate(const LunarDate& date);
-std::string LunarCellText(int year, int month, int day);
 
 struct RoomEnvironment {
     float temperature_c = 0;

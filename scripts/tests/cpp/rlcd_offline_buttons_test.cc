@@ -59,9 +59,7 @@ struct Pomodoro {
     void Stop() { active = false; }
 };
 struct Display {
-    int toggles = 0, months = 0, homes = 0;
-    void ToggleHomeCalendarPage() { ++toggles; }
-    void BrowseCalendarMonth(int n) { months += n; }
+    int homes = 0;
     void RequestPage(rlcd_dashboard::DashboardPage) { ++homes; }
 };
 struct Power {
@@ -128,7 +126,6 @@ int main() {
     app.player.paused = false;
     board.user_button_.click();
     app.Drain();
-    assert(board.display.toggles == 0);
     board.local_music_scan_pending_ = true;
     unsigned revision = board.local_music_scan_revision_;
     board.user_button_.hold();
