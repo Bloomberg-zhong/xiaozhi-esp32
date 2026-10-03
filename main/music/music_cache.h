@@ -23,6 +23,10 @@ public:
         ~Entry();
         std::string guard;
         bool artwork_only = false;
+
+    private:
+        friend class MusicCache;
+        std::shared_ptr<void> pin_;
     };
     class Writer {
     public:

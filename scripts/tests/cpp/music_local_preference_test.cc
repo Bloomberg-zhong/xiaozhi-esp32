@@ -84,6 +84,9 @@ int main(int argc, char** argv) {
     assert(result.tracks[0].album == "Original album" && result.tracks[0].duration_ms == 123000);
     assert(result.tracks[0].lyric_text == cached.lyric_text);
     const std::string cached_path = result.tracks[0].stream_url;
+    result = SearchMusic(player, "Cached Original Singer", "", 20, true);
+    assert(result.prepared_entry && result.prepared_entry->track.stream_url == cached_path);
+    result = SearchOutcome{};  // release the pin before simulating external damage
 
     result = SearchMusic(player, "Artist Song", "gateway", 20);
     assert(result.ok && result.tracks[0].title == "Online song");
@@ -103,7 +106,8 @@ int main(int argc, char** argv) {
     std::fstream corrupt(cached_path, std::ios::in | std::ios::out | std::ios::binary);
     corrupt.put('X');
     corrupt.close();
-    result = SearchMusic(player, "Cached Original Singer", "", 20);
+    result = SearchMusic(player, "Cached Original Singer", "", 20, true);
+    assert(!result.prepared_entry);
     assert(result.ok && result.tracks[0].title == "Online song" && online->searches == 4);
     result = SearchMusic(player, "", "", 20);
     assert(result.ok && result.tracks[0].title == "Online song" && online->searches == 5);

@@ -183,12 +183,13 @@ std::shared_ptr<MusicSource> MusicPlayer::GetSource() const {
 }
 
 void MusicPlayer::SetQueue(std::vector<MusicTrack> tracks, size_t start_index, bool loop,
-                           std::string tag) {
+                           std::string tag, std::shared_ptr<MusicCache::Entry> prepared_entry) {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_ = std::move(tracks);
     index_ = start_index < queue_.size() ? start_index : 0;
     loop_queue_ = loop;
     queue_tag_ = std::move(tag);
+    prepared_entry_ = std::move(prepared_entry);
 }
 
 void MusicPlayer::GetQueue(std::vector<MusicTrack>& tracks, size_t& index) const {
@@ -227,6 +228,12 @@ bool MusicPlayer::RemoveFromQueue(size_t index) {
         return false;
     }
     queue_.erase(queue_.begin() + index);
+    if (prepared_entry_ &&
+        std::none_of(queue_.begin(), queue_.end(), [this](const MusicTrack& track) {
+            return track.stream_url == prepared_entry_->track.stream_url;
+        })) {
+        prepared_entry_.reset();
+    }
     if (index < index_) {
         --index_;
     } else if (index == index_ && index_ >= queue_.size()) {
@@ -240,6 +247,7 @@ void MusicPlayer::ClearQueue() {
     queue_.clear();
     index_ = 0;
     queue_tag_.clear();
+    prepared_entry_.reset();
 }
 
 std::string MusicPlayer::queue_tag() const {
@@ -342,6 +350,11 @@ uint32_t MusicPlayer::Play() {
             session->track = queue_[index_];
             session->source = source_;
             session->local_root = local_root_;
+            if (prepared_entry_ && prepared_entry_->track.stream_url == session->track.stream_url) {
+                session->cache_entry = std::move(prepared_entry_);
+            } else {
+                prepared_entry_.reset();
+            }
             if (!StartTasks(session)) {
                 return 0;
             }
@@ -762,7 +775,9 @@ void MusicPlayer::ReadLocalFile(const std::shared_ptr<Session>& session) {
 void MusicPlayer::NetTask(const std::shared_ptr<Session>& session) {
     MusicCache cache(session->local_root);
     if (IsLocalMusicPath(session->track.stream_url)) {
-        session->cache_entry = cache.PinLocal(session->track.stream_url);
+        if (!session->cache_entry) {
+            session->cache_entry = cache.PinLocal(session->track.stream_url);
+        }
         if (MusicCache::IsManagedPath(session->track.stream_url) && !session->cache_entry) {
             std::lock_guard<std::mutex> lock(session->mutex);
             session->error = "cached music file is incomplete or damaged";

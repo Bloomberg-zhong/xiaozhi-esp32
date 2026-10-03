@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef ESP_PLATFORM
+#include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_vfs_fat.h>
 #else
 #include <sys/statvfs.h>
@@ -25,8 +27,34 @@ constexpr const char* kMarker = "XIAOZHI-MUSIC-CACHE-1\n";
 constexpr size_t kMaxFieldBytes = 64 * 1024;
 constexpr const char* kLyricMarker = "XIAOZHI-MUSIC-LYRICS-1\n";
 std::mutex cache_mutex;
-std::map<std::string, size_t> pins;
-std::map<std::string, size_t> artwork_pins;
+// Acquiring pins and checking GC eligibility happen under cache_mutex. Releasing
+// a shared token never takes that mutex, so an audio/main task cannot wait for
+// a worker's SD checksum when retiring a session or replacing a queue.
+using PinMap = std::map<std::string, std::weak_ptr<void>>;
+PinMap pins;
+PinMap artwork_pins;
+
+bool HasPins(const PinMap& holders, const std::string& guard) {
+    const auto found = holders.find(guard);
+    return found != holders.end() && !found->second.expired();
+}
+
+std::shared_ptr<void> HoldPin(PinMap& holders, const std::string& guard) {
+    for (auto it = holders.begin(); it != holders.end();) {
+        if (it->second.expired()) {
+            it = holders.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    auto& weak = holders[guard];
+    auto pin = weak.lock();
+    if (!pin) {
+        pin = std::make_shared<int>(0);
+        weak = pin;
+    }
+    return pin;
+}
 std::map<std::string, uint64_t> writers;
 
 struct Metadata {
@@ -135,6 +163,9 @@ bool ReadMetadata(const std::string& path, Metadata& metadata) {
 }
 
 bool ValidAudio(const std::string& path, const Metadata& metadata) {
+#ifdef ESP_PLATFORM
+    const int64_t started_us = esp_timer_get_time();
+#endif
     struct stat info;
     if (!RegularFile(path, info) || static_cast<uint64_t>(info.st_size) != metadata.bytes) {
         return false;
@@ -145,7 +176,9 @@ bool ValidAudio(const std::string& path, const Metadata& metadata) {
     }
     // This path is also called by the cover and local scanner tasks. Keep the
     // checksum workspace off their small stacks, including libc/FAT call depth.
-    std::vector<char> buffer(2048);
+    // Larger sequential reads avoid thousands of small FAT/SD transactions.
+    // Still hash every byte; same-size damaged files must never become hits.
+    std::vector<char> buffer(16 * 1024);
     uint32_t checksum = 2166136261U;
     size_t read;
     while ((read = std::fread(buffer.data(), 1, buffer.size(), file)) > 0) {
@@ -153,6 +186,11 @@ bool ValidAudio(const std::string& path, const Metadata& metadata) {
     }
     bool ok = !std::ferror(file) && checksum == metadata.checksum;
     std::fclose(file);
+#ifdef ESP_PLATFORM
+    ESP_LOGI("MusicCache", "Audio integrity: bytes=%llu, elapsed=%lld ms, valid=%d",
+             static_cast<unsigned long long>(metadata.bytes),
+             static_cast<long long>((esp_timer_get_time() - started_us) / 1000), ok);
+#endif
     return ok;
 }
 
@@ -426,7 +464,7 @@ bool MakeRoom(const std::string& root, MusicCache::Limits limits, uint64_t incom
                     used += pending.expected;
                     const auto reserved = pending.expected - pending.written;
                     reserved_free += reserved;
-                    if (!pins.count(guard) && !artwork_pins.count(guard))
+                    if (!HasPins(pins, guard) && !HasPins(artwork_pins, guard))
                         removable.push_back(
                             {part, pending.expected, info.st_mtime, reserved, true});
                 }
@@ -443,7 +481,8 @@ bool MakeRoom(const std::string& root, MusicCache::Limits limits, uint64_t incom
                     continue;
                 used += info.st_size;
                 const auto guard = Guard(root, cover_key);
-                if (!pins.count(guard) && !artwork_pins.count(guard) && !writers.count(guard)) {
+                if (!HasPins(pins, guard) && !HasPins(artwork_pins, guard) &&
+                    !writers.count(guard)) {
                     removable.push_back(
                         {audio, static_cast<uint64_t>(info.st_size), info.st_mtime});
                 }
@@ -453,13 +492,13 @@ bool MakeRoom(const std::string& root, MusicCache::Limits limits, uint64_t incom
                     continue;
                 used += info.st_size;
                 const auto guard = Guard(root, cover_key);
-                if (!pins.count(guard) && !writers.count(guard)) {
+                if (!HasPins(pins, guard) && !writers.count(guard)) {
                     removable.push_back(
                         {audio, static_cast<uint64_t>(info.st_size), info.st_mtime});
                 }
             } else if (ReadMetadata(audio, metadata) && RegularFile(audio, info)) {
                 used += info.st_size;
-                if (!pins.count(Guard(root, metadata.guard))) {
+                if (!HasPins(pins, Guard(root, metadata.guard))) {
                     removable.push_back(
                         {audio, static_cast<uint64_t>(info.st_size), info.st_mtime});
                 }
@@ -514,13 +553,7 @@ MusicCache::MusicCache(std::string root, Limits limits) : root_(std::move(root))
         root_.pop_back();
     }
 }
-MusicCache::Entry::~Entry() {
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto& holders = artwork_only ? artwork_pins : pins;
-    if (--holders[guard] == 0) {
-        holders.erase(guard);
-    }
-}
+MusicCache::Entry::~Entry() = default;
 
 bool MusicCache::IsManagedPath(const std::string& path) {
     return path.find("/music-cache/") != std::string::npos &&
@@ -564,7 +597,7 @@ std::shared_ptr<MusicCache::Entry> MusicCache::PinLocal(const std::string& path)
     auto entry = std::make_shared<Entry>();
     entry->track = std::move(track);
     entry->guard = Guard(root_, metadata.guard);
-    ++pins[entry->guard];
+    entry->pin_ = HoldPin(pins, entry->guard);
     return entry;
 }
 
@@ -610,7 +643,7 @@ std::shared_ptr<MusicCache::Entry> MusicCache::PinArtwork(const MusicTrack& trac
     pin->track = track;
     pin->guard = Guard(root_, key);
     pin->artwork_only = true;
-    ++artwork_pins[pin->guard];
+    pin->pin_ = HoldPin(artwork_pins, pin->guard);
     // Artwork is independently decoded; it must not checksum the entire audio
     // file a second time merely to protect its companion from garbage collection.
     return pin;
@@ -654,7 +687,8 @@ std::unique_ptr<MusicCache::Writer> MusicCache::Begin(const MusicTrack& track,
         RegularFile(part, info) && static_cast<uint64_t>(info.st_size) == pending.written) {
         existing = info.st_size;
     }
-    if (writers.count(guard) || pins.count(guard) || !MakeRoom(root_, limits_, expected, guard)) {
+    if (writers.count(guard) || HasPins(pins, guard) ||
+        !MakeRoom(root_, limits_, expected, guard)) {
         return nullptr;
     }
     auto writer = std::make_unique<Writer>();
@@ -870,8 +904,8 @@ bool MusicCache::Writer::Suspend() {
                 RegularFile(part, info)) {
                 ++count;
                 const auto guard = Guard(root_, job.guard);
-                if (guard != guard_ && !writers.count(guard) && !pins.count(guard) &&
-                    !artwork_pins.count(guard)) {
+                if (guard != guard_ && !writers.count(guard) && !HasPins(pins, guard) &&
+                    !HasPins(artwork_pins, guard)) {
                     removable.emplace_back(info.st_mtime, part);
                 }
             }
@@ -964,7 +998,7 @@ bool MusicCache::StoreCover(const MusicTrack& track, const std::string& base, co
         std::string key;
         OwnedCover(cover->second, key);
         const auto guard = Guard(root_, key);
-        if (cover->second == path || pins.count(guard) || artwork_pins.count(guard) ||
+        if (cover->second == path || HasPins(pins, guard) || HasPins(artwork_pins, guard) ||
             writers.count(guard))
             continue;
         if (std::remove(cover->second.c_str()) == 0) {
@@ -976,12 +1010,11 @@ bool MusicCache::StoreCover(const MusicTrack& track, const std::string& base, co
     if (!slot)
         return false;
     const auto guard = Guard(root_, key);
-    ++pins[guard];  // MakeRoom cannot remove this song while writing its artwork.
+    auto pin = HoldPin(pins, guard);  // Protect the song while publishing its artwork.
     // Artwork must count this song's entire active/pending audio reservation.
     // The pin protects it while only the final replacement counts in the budget.
     const bool room = MakeRoom(root_, limits_, size, "", replacing ? path : "");
-    if (--pins[guard] == 0)
-        pins.erase(guard);
+    pin.reset();
     if (!room)
         return false;
     const int fd = open((path + ".part").c_str(), O_WRONLY | O_CREAT | O_EXCL, 0664);
@@ -1088,7 +1121,7 @@ bool MusicCache::StoreLyrics(const MusicTrack& track, const std::string& base,
             break;
         OwnedLyrics(lyric.second, owner, bytes, checksum);
         const auto guard = Guard(root_, owner);
-        if (pins.count(guard) || writers.count(guard))
+        if (HasPins(pins, guard) || writers.count(guard))
             continue;
         if (std::remove(lyric.second.c_str()) == 0) {
             std::remove((lyric.second + ".meta").c_str());
@@ -1098,13 +1131,12 @@ bool MusicCache::StoreLyrics(const MusicTrack& track, const std::string& base,
     if (!slot)
         return false;
     const auto guard = Guard(root_, key);
-    ++pins[guard];
+    auto pin = HoldPin(pins, guard);
     // Count the full audio writer/pending reservation, including this song.
     // Replacement needs space for the atomic temporary, but only the final
     // companion contributes to the cache budget.
     const bool room = MakeRoom(root_, limits_, text.size(), "", owned ? path : "");
-    if (--pins[guard] == 0)
-        pins.erase(guard);
+    pin.reset();
     if (!room)
         return false;
     const int fd = open((path + ".part").c_str(), O_WRONLY | O_CREAT | O_EXCL, 0664);

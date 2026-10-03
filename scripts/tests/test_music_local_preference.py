@@ -11,6 +11,12 @@ MUSIC = ROOT / "main/music"
 
 
 class MusicLocalPreferenceTests(unittest.TestCase):
+    def test_play_request_shows_progress_before_searching(self):
+        source = (MUSIC / "music_tools.cc").read_text()
+        play = source.split('"self.music.play",', 1)[1].split('play->set_async', 1)[0]
+        self.assertIn('正在查找歌曲', play)
+        self.assertLess(play.index('app.Schedule('), play.index('SearchMusic(player,'))
+
     def test_voice_search_defers_checksums_until_after_matching(self):
         source = (MUSIC / "music_tools.cc").read_text()
         selection = source.split("SearchOutcome SearchMusic(", 1)[1].split(

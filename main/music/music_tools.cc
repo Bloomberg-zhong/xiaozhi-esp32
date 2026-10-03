@@ -117,12 +117,13 @@ MusicTrack LocalTrackFromPath(const FavoriteEntry& entry) {
 // explicit source or an empty query keeps its requested catalog behavior.
 struct SearchOutcome {
     std::vector<MusicTrack> tracks;
+    std::shared_ptr<MusicCache::Entry> prepared_entry;
     std::string error;
     bool ok = false;
 };
 
 SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const std::string& source,
-                          int limit) {
+                          int limit, bool prepare_first = false) {
     SearchOutcome outcome;
     auto online = player.GetSource();
     const std::string root = player.GetLocalRoot();
@@ -145,9 +146,17 @@ SearchOutcome SearchMusic(MusicPlayer& player, const std::string& query, const s
             // A named request verifies only matching candidates, preserving online
             // fallback for damaged cache entries without reading the whole library.
             // An unfiltered local catalog defers checksums to PinLocal at playback.
-            if (!query.empty() && MusicCache::IsManagedPath(track.stream_url) &&
-                !MusicCache::ReadTrack(track.stream_url, track)) {
-                continue;
+            if (!query.empty() && MusicCache::IsManagedPath(track.stream_url)) {
+                if (prepare_first && outcome.tracks.empty()) {
+                    auto entry = MusicCache(root).PinLocal(track.stream_url);
+                    if (!entry) {
+                        continue;
+                    }
+                    track = entry->track;
+                    outcome.prepared_entry = std::move(entry);
+                } else if (!MusicCache::ReadTrack(track.stream_url, track)) {
+                    continue;
+                }
             }
             outcome.tracks.push_back(std::move(track));
             if (outcome.tracks.size() >= static_cast<size_t>(limit)) {
@@ -234,8 +243,13 @@ void AddMusicTools(McpServer& server) {
                 return MakeResult(false, error);
             }
             const std::string source = properties["source"].value<std::string>();
-            auto found =
-                SearchMusic(player, properties["query"].value<std::string>(), source, kSearchLimit);
+            app.Schedule([]() {
+                if (auto display = Board::GetInstance().GetDisplay()) {
+                    display->ShowNotification("正在查找歌曲", 3000);
+                }
+            });
+            auto found = SearchMusic(player, properties["query"].value<std::string>(), source,
+                                     kSearchLimit, true);
             if (!found.ok) {
                 return MakeResult(false, found.error);
             }
@@ -243,7 +257,8 @@ void AddMusicTools(McpServer& server) {
             cJSON_AddItemToObject(result, "now_playing", MakeTrackJson(found.tracks.front()));
             cJSON_AddNumberToObject(result, "queue_length", found.tracks.size());
             const bool local = IsLocalMusicPath(found.tracks.front().stream_url);
-            player.SetQueue(std::move(found.tracks), 0, false, local ? "local" : "online");
+            player.SetQueue(std::move(found.tracks), 0, false, local ? "local" : "online",
+                            std::move(found.prepared_entry));
             if (!mode_name.empty()) {
                 ApplyPlayMode(mode);
             }

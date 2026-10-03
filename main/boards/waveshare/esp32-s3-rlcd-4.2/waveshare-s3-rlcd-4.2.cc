@@ -4,6 +4,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
 #include <esp_network.h>
+#include <esp_pm.h>
 #include "application.h"
 #include "button.h"
 #include "codecs/box_audio_codec.h"
@@ -257,6 +258,28 @@ private:
     }
 #endif
 
+    void ConfigureCpuPower(PowerSaveLevel level) {
+#if CONFIG_PM_ENABLE
+        // Keep capture and wake detection running. DFS can lower idle clocks,
+        // while its maximum and every active conversation stay at full speed.
+        esp_pm_config_t config = {
+            .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+            .min_freq_mhz =
+                level == PowerSaveLevel::PERFORMANCE ? CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ : 80,
+            .light_sleep_enable = false,
+        };
+        const auto err = esp_pm_configure(&config);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "CPU power policy failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "CPU policy: %d-%d MHz, continuous voice wake", config.min_freq_mhz,
+                     config.max_freq_mhz);
+        }
+#else
+        (void)level;
+#endif
+    }
+
     void InitializePowerSaveTimer() {
         Settings settings("wifi", false);
         int idle_seconds = settings.GetInt("sleep_seconds", POWER_SAVE_IDLE_SECONDS);
@@ -431,6 +454,7 @@ public:
     }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        ConfigureCpuPower(level);
         // Conversations, notifications and music raise the level: leave sleep.
         if (level != PowerSaveLevel::LOW_POWER && power_save_timer_ != nullptr) {
             power_save_timer_->WakeUp();

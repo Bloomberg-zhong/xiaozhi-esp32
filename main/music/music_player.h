@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "lrc_parser.h"
+#include "music_cache.h"
 #include "music_source.h"
 
 class AudioService;
@@ -60,7 +61,8 @@ public:
     // `loop` repeats the whole queue regardless of the play mode; `tag` lets
     // other features (such as the pomodoro white noise) recognize their queue.
     void SetQueue(std::vector<MusicTrack> tracks, size_t start_index, bool loop = false,
-                  std::string tag = "");
+                  std::string tag = "",
+                  std::shared_ptr<MusicCache::Entry> prepared_entry = nullptr);
     std::string queue_tag() const;
 
     // Queue management. Indexes are 0-based. Callers restart playback (through
@@ -117,6 +119,9 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<MusicSource> source_;
     std::vector<MusicTrack> queue_;
+    // One selected, fully verified SD song stays pinned through the spoken
+    // confirmation; ownership moves to its session before the reader starts.
+    std::shared_ptr<MusicCache::Entry> prepared_entry_;
     size_t index_ = 0;
     MusicPlayMode play_mode_ = MusicPlayMode::kSequence;
     bool loop_queue_ = false;
